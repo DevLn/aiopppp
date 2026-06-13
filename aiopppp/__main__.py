@@ -45,7 +45,7 @@ def on_device_lost(device):
 async def amain(remote_addr, local_port, username, password):
     global discovery
     global new_device_fut
-    discovery = Discovery(remote_addr=remote_addr)
+    discovery = Discovery(remote_addr=remote_addr, local_port=local_port)
 
     discovery_task = asyncio.create_task(discovery.discover(lambda d: on_device_found(d, username, password)))
     webserver_task = asyncio.create_task(start_web_server())
