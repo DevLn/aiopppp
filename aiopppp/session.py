@@ -112,36 +112,34 @@ class VideoQueueMixin:
     async def process_video_frame(self):
         if len(self.video_boundaries) <= 1:
             return
-        frame_starts = sorted(list(self.video_boundaries))
+        frame_starts = sorted(self.video_boundaries)
         index = frame_starts[-2]
         last_index = frame_starts[-1]
 
-        if index == self.last_video_frame:
-            return
+        if index != self.last_video_frame:
+            # Cheap completeness check: stop at the first gap instead of building
+            # the payload (and the diagnostic string) on every incoming chunk.
+            complete = all(i in self.video_received for i in range(index, last_index))
+            if logger.isEnabledFor(logging.DEBUG):
+                completeness = ''.join(
+                    'x' if i in self.video_received else '_'
+                    for i in range(index, last_index)
+                )
+                logger.debug(f".. completeness: {completeness}")
 
-        complete = True
-        out = []
-        completeness = ''
-        for i in range(index, last_index):
-            if self.video_received.get(i) is not None:
-                out.append(self.video_received[i])
-                completeness += 'x'
-            else:
-                complete = False
-                completeness += '_'
-        logger.debug(f".. completeness: {completeness}")
+            if complete:
+                self.last_video_frame = index
+                data = b''.join(self.video_received[i] for i in range(index, last_index))
+                await self.frame_buffer.publish(VideoFrame(idx=index, data=data))
 
-        if complete:
-            self.last_video_frame = index
-
-            await self.frame_buffer.publish(VideoFrame(idx=index, data=b''.join(out)))
-
-            to_delete = [idx for idx in self.video_received.keys() if idx < index]
-            for idx in to_delete:
-                del self.video_received[idx]
-            to_delete = [idx for idx in self.video_boundaries if idx < index]
-            for idx in to_delete:
-                self.video_boundaries.remove(idx)
+        # Only the last two boundaries are ever assembled, so chunks/boundaries
+        # below the current frame start can never be published. Drop them on
+        # every call (not just on completion) so a permanently incomplete frame
+        # from packet loss can't make these buffers grow without bound.
+        for idx in [i for i in self.video_received if i < index]:
+            del self.video_received[idx]
+        for idx in [i for i in self.video_boundaries if i < index]:
+            self.video_boundaries.remove(idx)
 
 
 class Session(PacketQueueMixin, VideoQueueMixin):
