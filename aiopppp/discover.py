@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from random import randint
 
 from .const import CAM_MAGIC, PacketType
 from .encrypt import ENC_METHODS
@@ -83,9 +82,15 @@ class Discovery:
     async def discover(self, callback, period=10):
         assert period >= 1, 'need to wait for camera response more than 1 second'
         logger.info('Start discovery on %s:%d', self.remote_addr, self.remote_port)
-        initial_port = self.local_port or randint(0x800, 0xfff0)
 
-        self.transport = await create_udp_server(initial_port, lambda data, addr: self.on_receive(data, addr, callback))
+        # Bind to the requested local port, or 0 to let the OS pick a free one.
+        # A hard-coded random port could land in an OS-reserved range and fail
+        # to bind (e.g. WinError 10013 on Windows); port 0 always succeeds.
+        self.transport = await create_udp_server(
+            self.local_port, lambda data, addr: self.on_receive(data, addr, callback),
+        )
+        bound_port = self.transport.get_extra_info('sockname')[1]
+        logger.info('Discovery listening on local UDP port %d', bound_port)
         possible_discovery_packets = self.get_possible_discovery_packets()
         try:
             while True:
