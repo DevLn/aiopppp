@@ -15,6 +15,7 @@ from .const import (
     PtzParamType,
     VideoParamType,
     VideoResolution,
+    VideoRotate,
 )
 from .encrypt import ENC_METHODS
 from .exceptions import AuthError, CommandResultError
