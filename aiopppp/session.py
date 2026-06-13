@@ -143,7 +143,7 @@ class VideoQueueMixin:
 
 
 class Session(PacketQueueMixin, VideoQueueMixin):
-    def __init__(self, dev, on_disconnect, *args, **kwargs):
+    def __init__(self, dev, on_disconnect, *args, on_video_state_change=None, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.state = State.DISCONNECTED
@@ -157,6 +157,9 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         self.last_alive_pkt_at = datetime.datetime.now()
         self.last_drw_pkt_at = datetime.datetime.now()
         self.on_disconnect = on_disconnect
+        # Called with the new is_video_requested value whenever streaming
+        # starts or stops (including when the session is torn down).
+        self.on_video_state_change = on_video_state_change
         self.main_task = None
         self.drw_waiters = {}
         self.cmd_waiters = {}
@@ -164,6 +167,10 @@ class Session(PacketQueueMixin, VideoQueueMixin):
 
     def __str__(self):
         return f'Session({self.dev.dev_id}) ({self.state.name})'
+
+    def _notify_video_state(self):
+        if self.on_video_state_change:
+            self.on_video_state_change(self.is_video_requested)
 
     async def create_udp(self):
         loop = asyncio.get_running_loop()
@@ -231,10 +238,12 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             self.last_drw_pkt_at = datetime.datetime.now()
             await self._request_video(1)
             self.is_video_requested = True
+            self._notify_video_state()
 
     async def stop_video(self):
         if self.is_video_requested:
             self.is_video_requested = False
+            self._notify_video_state()
             self.video_stale_at = None
             self.video_received = {}
             self.video_boundaries = set()
@@ -358,6 +367,10 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         if self.transport:
             self.transport.close()
             self.transport = None
+        if self.is_video_requested:
+            # The session is going away, so streaming has effectively stopped.
+            self.is_video_requested = False
+            self._notify_video_state()
         self.state = State.DISCONNECTED
 
     async def reboot(self):
@@ -808,7 +821,14 @@ class SharedFrameBuffer:
 
 
 def make_session(device: DeviceDescriptor, on_device_lost: Callable[[DeviceDescriptor], None],
-                 login: str = '', password: str = '') -> Session:
+                 login: str = '', password: str = '',
+                 on_video_state_change: Callable[[bool], None] = None) -> Session:
     """Create a session for the camera."""
     session_class = JsonSession if device.is_json else BinarySession
-    return session_class(device, on_disconnect=on_device_lost, login=login, password=password)
+    return session_class(
+        device,
+        on_disconnect=on_device_lost,
+        login=login,
+        password=password,
+        on_video_state_change=on_video_state_change,
+    )

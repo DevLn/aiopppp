@@ -39,13 +39,17 @@ async def find_device(ip_address: str, timeout: int = 20) -> DeviceDescriptor:
 
 
 class Device:
-    def __init__(self, ip_address: str, username: str = '', password: str = ''):
+    def __init__(self, ip_address: str, username: str = '', password: str = '',
+                 on_video_state_change=None):
         self.ip_address = ip_address
         self.descriptor: DeviceDescriptor | None = None
         self.properties: dict = {}
         self._session: Session | None = None
         self.username = username
         self.password = password
+        # Optional callback(is_streaming: bool) forwarded to the session, fired
+        # whenever video streaming starts or stops.
+        self.on_video_state_change = on_video_state_change
         self.enable_reconnect = False
 
     async def connect(self, timeout: int = 15):
@@ -59,6 +63,7 @@ class Device:
             login=self.username,
             password=self.password,
             on_device_lost=lambda dev: self.on_device_lost(),
+            on_video_state_change=self.on_video_state_change,
         )
         self._session.start()
         session_tasks = self._session.running_tasks()
