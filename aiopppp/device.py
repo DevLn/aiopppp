@@ -32,9 +32,10 @@ async def find_device(ip_address: str, timeout: int = 20) -> DeviceDescriptor:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        if cam_device_fut.done():
-            return cam_device_fut.result()
-        raise TimeoutError("Timeout connecting to the camera")
+
+    if cam_device_fut.done():
+        return cam_device_fut.result()
+    raise TimeoutError("Timeout connecting to the camera")
 
 
 class Device:
