@@ -344,15 +344,21 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             self.on_disconnect(self.dev)
 
     def stop(self):
-        if self.state != State.CONNECTED:
-            raise RuntimeError('Session is not started')
+        if self.state == State.DISCONNECTED:
+            # Already stopped: stop() is reachable from _on_device_lost(),
+            # Device.close() and the CLI shutdown loop, so it must be idempotent.
+            return
         logger.info('Stopping task for %s', self.dev.dev_id)
         self.device_is_ready.set()
-        self.process_packet_task.cancel()
-        self.process_video_task.cancel()
-        self.main_task.cancel()
-        self.transport.close()
-        self.transport = None
+        if self.process_packet_task:
+            self.process_packet_task.cancel()
+        if self.process_video_task:
+            self.process_video_task.cancel()
+        if self.main_task:
+            self.main_task.cancel()
+        if self.transport:
+            self.transport.close()
+            self.transport = None
         self.state = State.DISCONNECTED
 
     async def reboot(self):
