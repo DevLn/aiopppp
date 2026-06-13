@@ -520,8 +520,9 @@ class JsonSession(Session):
 
     async def toggle_ir(self, value):
         logger.info('%s: toggle IR = %s', self.dev.dev_id, value)
-        idx = await self.control(icut=1 if value else 0)
-        await self.wait_ack(idx)
+        # control() already waits for the ACK; it returns None, so the previous
+        # `await self.wait_ack(idx)` raised ValueError on every call.
+        await self.control(icut=1 if value else 0)
 
     async def rotate_start(self, value):
         logger.info('%s: rotate_start %s', self.dev.dev_id, value)
