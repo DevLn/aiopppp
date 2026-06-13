@@ -395,7 +395,9 @@ class JsonSession(Session):
             'cmd': cmd.value,
         }
         pkt_idx = self.outgoing_command_idx
-        self.outgoing_command_idx += 1
+        # The index is sent as a 16-bit field and ACKs only echo 16 bits, so it
+        # must wrap; otherwise sends raise struct.error and ACK matching breaks.
+        self.outgoing_command_idx = (self.outgoing_command_idx + 1) & 0xFFFF
         pkt = JsonCmdPkt(pkt_idx, {**data, **kwargs, **self.get_common_data()})
         if with_response:
             self.cmd_waiters[cmd.value] = asyncio.Future()
@@ -639,7 +641,9 @@ class BinarySession(Session):
 
     async def send_command(self, cmd, cmd_payload=b'', *, with_response=False, **kwargs):
         pkt_idx = self.outgoing_command_idx
-        self.outgoing_command_idx += 1
+        # The index is sent as a 16-bit field and ACKs only echo 16 bits, so it
+        # must wrap; otherwise sends raise struct.error and ACK matching breaks.
+        self.outgoing_command_idx = (self.outgoing_command_idx + 1) & 0xFFFF
         pkt = BinaryCmdPkt(
             pkt_idx,
             cmd,
