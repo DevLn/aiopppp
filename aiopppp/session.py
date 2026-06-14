@@ -143,6 +143,12 @@ class VideoQueueMixin:
 
 
 class Session(PacketQueueMixin, VideoQueueMixin):
+    # If no packet arrives from the camera for this many seconds, treat the
+    # connection as dead and tear it down. Works for both JSON and binary
+    # cameras (binary has no other liveness check), and catches a silently
+    # dropped peer that would otherwise leave a zombie session.
+    RECV_TIMEOUT_SEC = 20
+
     def __init__(self, dev, on_disconnect, *args, on_video_state_change=None, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -156,6 +162,7 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         self.video_stale_at = None
         self.last_alive_pkt_at = datetime.datetime.now()
         self.last_drw_pkt_at = datetime.datetime.now()
+        self.last_recv_at = datetime.datetime.now()
         self.on_disconnect = on_disconnect
         # Called with the new is_video_requested value whenever streaming
         # starts or stops (including when the session is torn down).
@@ -181,6 +188,9 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         return transport
 
     def on_receive(self, data):
+        # The transport is bound to the camera's address, so any datagram here
+        # is proof of life for the dead-connection check in loop_step().
+        self.last_recv_at = datetime.datetime.now()
         decoded = ENC_METHODS[self.dev.encryption][0](data)
         pkt = parse_packet(decoded)
         # logger.debug(f"recv< {pkt} {pkt.get_payload()}")
@@ -330,8 +340,17 @@ class Session(PacketQueueMixin, VideoQueueMixin):
 
     async def loop_step(self):
         logger.debug(f"iterate in Session for {self.dev.dev_id}")
-        if (datetime.datetime.now() - self.last_alive_pkt_at).total_seconds() > 10:
-            self.last_alive_pkt_at = datetime.datetime.now()
+        now = datetime.datetime.now()
+        if (now - self.last_recv_at).total_seconds() > self.RECV_TIMEOUT_SEC:
+            logger.warning(
+                'No packets from %s for %ds: connection is dead, disconnecting',
+                self.dev.dev_id, self.RECV_TIMEOUT_SEC,
+            )
+            await self.send_close_pkt()
+            self._on_device_lost()
+            return
+        if (now - self.last_alive_pkt_at).total_seconds() > 10:
+            self.last_alive_pkt_at = now
             logger.info('Send P2PAlive')
             await self.send(make_p2palive_pkt())
 
@@ -523,6 +542,9 @@ class JsonSession(Session):
             logger.warning('No video for 10 seconds. Disconnecting')
             await self.send_close_pkt()
             self._on_device_lost()
+            # Session is being torn down; don't fall through to the base
+            # loop_step (which would touch the now-closed transport).
+            return
         await super().loop_step()
 
     async def control(self, no_ack=False, **kwargs):
