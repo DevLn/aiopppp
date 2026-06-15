@@ -318,7 +318,17 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         await self.send_initial_packets()
 
         try:
-            await asyncio.wait_for(self._p2p_rdy_debouncer.wait(), timeout=10)
+            try:
+                await asyncio.wait_for(self._p2p_rdy_debouncer.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                # Camera answered discovery but never completed the P2pRdy
+                # handshake (common when it is flaky/half-wedged). Treat it as a
+                # lost device rather than letting an unhandled exception escape
+                # and take the whole process down.
+                logger.warning('%s did not become ready (no P2pRdy), disconnecting', self.dev.dev_id)
+                await self.send_close_pkt()
+                self._on_device_lost()
+                return
             logger.info('Connected to %s at %s, json=%s', self.dev.dev_id, self.dev.addr, self.dev.is_json)
             self.state = State.CONNECTED
             try:
@@ -337,6 +347,16 @@ class Session(PacketQueueMixin, VideoQueueMixin):
                 logger.debug('Session main task cancelled, sending close packet')
                 await self.send_close_pkt()
             raise
+        except Exception:
+            # A single session must never crash the whole process. Log it, tear
+            # the session down, and let discovery/HA reconnect.
+            logger.exception('Session for %s failed; disconnecting', self.dev.dev_id)
+            try:
+                await self.send_close_pkt()
+            except Exception:
+                pass
+            self._on_device_lost()
+            return
 
     async def loop_step(self):
         logger.debug(f"iterate in Session for {self.dev.dev_id}")
@@ -371,9 +391,12 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             self.on_disconnect(self.dev)
 
     def stop(self):
-        if self.state == State.DISCONNECTED:
-            # Already stopped: stop() is reachable from _on_device_lost(),
+        if self.state == State.DISCONNECTED and self.transport is None:
+            # Already fully stopped. stop() is reachable from _on_device_lost(),
             # Device.close() and the CLI shutdown loop, so it must be idempotent.
+            # Note: a session that started connecting but never reached CONNECTED
+            # (e.g. P2pRdy timeout) is still DISCONNECTED but has a live transport
+            # and queue tasks, so we must fall through and clean those up.
             return
         logger.info('Stopping task for %s', self.dev.dev_id)
         self.device_is_ready.set()
