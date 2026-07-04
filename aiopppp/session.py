@@ -9,6 +9,7 @@ from .const import (
     JSON_COMMAND_NAMES,
     PTZ,
     BinaryCommands,
+    CgiCommands,
     JsonCommands,
     PacketType,
     PtzDirection,
@@ -1111,6 +1112,29 @@ class BinarySession(Session):
         idx = self._outgoing_audio_idx & 0xFFFF
         self._outgoing_audio_idx = (self._outgoing_audio_idx + 1) & 0xFFFF
         await self.send(make_audio_drw_pkt(idx, payload))
+
+    # --- CGI command vocabulary -------------------------------------------
+    # Some A9/XD firmwares answer on the CGI (CB_*) command set instead of the
+    # BinaryCommands (BINCMD) set. The on-wire distinction between the two
+    # vocabularies is not documented in the material this was built from, so
+    # these send the CGI opcode through the standard binary DRW frame. This is
+    # EXPERIMENTAL and may need adjusting against a CGI-firmware camera; it is
+    # provided as a hook so the CgiCommands vocabulary is reachable.
+
+    async def send_cgi_command(self, cgi_cmd: CgiCommands, cmd_payload=b'', *, with_response=False):
+        return await self.send_command(cgi_cmd, cmd_payload, with_response=with_response)
+
+    async def cgi_reboot(self):
+        await self.send_cgi_command(CgiCommands.CB_IEREBOOT)
+
+    async def cgi_set_ir(self, value):
+        await self.send_cgi_command(CgiCommands.CB_IESET_IR, self._onoff_payload(value))
+
+    async def cgi_format_sd(self):
+        await self.send_cgi_command(CgiCommands.CB_IEFORMATSD)
+
+    async def cgi_cam_control(self, payload=b''):
+        await self.send_cgi_command(CgiCommands.CB_CAM_CONTROL, payload)
 
     async def setup_device(self):
         auth = await self.login()
