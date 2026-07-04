@@ -690,6 +690,7 @@ class BinarySession(Session):
         BinaryCommands.CMD_PEER_LIGHTFILL_ONOFF: BinaryCommands.ACK_PEER_LIGHTFILL_ONOFF,
         BinaryCommands.CMD_SYSTEM_REBOOT: BinaryCommands.ACK_SYSTEM_REBOOT,
         BinaryCommands.CMD_SNAPSHOT_GET: BinaryCommands.ACK_SNAPSHOT_GET,
+        BinaryCommands.CMD_PEER_VIDEOPARAM_GET: BinaryCommands.ACK_PEER_VIDEOPARAM_GET,
     }
     REV_ACKS = {v: k for k, v in ACKS.items()}
 
@@ -843,6 +844,58 @@ class BinarySession(Session):
     async def set_video_param(self, name, value):
         payload = self._build_video_param(name, value)
         await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, payload)
+
+    async def get_video_param(self, param, timeout=5):
+        """Read back a single video parameter. `param` may be a VideoParamType
+        or a symbolic name (e.g. 'resolution'). Returns the raw ACK payload."""
+        if isinstance(param, VideoParamType):
+            param_val = param.value
+        else:
+            param_val = VideoParamType[f'VIDEO_PARAM_TYPE_{str(param).upper()}'].value
+        idx = await self.send_command(
+            BinaryCommands.CMD_PEER_VIDEOPARAM_GET, struct.pack('<I', param_val), with_response=True,
+        )
+        await self.wait_ack(idx)
+        return await self.wait_cmd_result(BinaryCommands.CMD_PEER_VIDEOPARAM_GET, timeout=timeout)
+
+    # Convenience setters -- thin wrappers over set_video_param so callers don't
+    # have to know the symbolic parameter names. Values may be ints or symbolic
+    # strings (e.g. resolution 'hd', rotate 'h').
+    async def set_resolution(self, value):
+        await self.set_video_param('resolution', value)
+
+    async def set_bitrate(self, value):
+        await self.set_video_param('bitrate', value)
+
+    async def set_framerate(self, value):
+        await self.set_video_param('framerate', value)
+
+    async def set_brightness(self, value):
+        await self.set_video_param('brightness', value)
+
+    async def set_contrast(self, value):
+        await self.set_video_param('contrast', value)
+
+    async def set_saturation(self, value):
+        await self.set_video_param('saturation', value)
+
+    async def set_sharpness(self, value):
+        await self.set_video_param('sharpness', value)
+
+    async def set_rotate(self, value):
+        """Flip/mirror the image. Value: VideoRotate or 'normal'/'h'/'v'/'hv'."""
+        await self.set_video_param('rotate', value)
+
+    async def set_scene(self, value):
+        """Scene mode: 'scene_normal'/'scene_human'/'scene_cool'/'scene_blacklight'
+        or the corresponding VideoParamType (they double as the mode selector)."""
+        if isinstance(value, str) and not value.upper().startswith('SCENE_'):
+            value = f'scene_{value}'
+        param = VideoParamType[f'VIDEO_PARAM_TYPE_{str(value).upper()}']
+        # Scene modes are selected by their own param type with value 1.
+        await self.send_command(
+            BinaryCommands.CMD_PEER_VIDEOPARAM_SET, struct.pack('<II', param.value, 1),
+        )
 
     async def login(self):
         # type is char account[0x20]; char password[0x80];
