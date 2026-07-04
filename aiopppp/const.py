@@ -28,21 +28,21 @@ class PacketType(Enum):
     RlyHelloAck2 = 0x71  # if len >1??
 
 
-class BinaryCommands(Enum):
+class DevCfgId(IntEnum):
+    """Config-section identifiers used by the DFTCFG import/export commands.
+
+    These are section selectors carried inside a config command's payload, not
+    command opcodes, and they reuse the 0x0000-0x0019 range that the ACK status
+    codes also occupy. Keeping them in their own enum prevents value aliasing
+    that would make BinaryCommands(value) ambiguous.
+    """
     CFGID_VERSION = 0x0000
-    CMD_ACK_OK = 0x0000
     CFGID_LANGUAGE = 0x0001
-    CMD_ACK_UNAUTH = 0x0001
     CFGID_PRODUCTE = 0x0002
-    CMD_ACK_NO_PRIVILEGE = 0x0002
     CFGID_UPGRADE = 0x0003
-    CMD_ACK_INVALID_PARAM = 0x0003
     CFGID_P2P = 0x0004
-    CMD_ACK_CMDEXCUTE_FAILED = 0x0004
     CFGID_TZ = 0x0005
-    CMD_ACK_NONE_RESULT = 0x0005
     CFGID_USER = 0x0006
-    CMD_ACK_UNKNOWN = 0x0006
     CFGID_OPR = 0x0007
     CFGID_SERIAL = 0x0008
     CFGID_WIRED = 0x0009
@@ -62,9 +62,25 @@ class BinaryCommands(Enum):
     CFGID_FTP = 0x0017
     CFGID_PUSH = 0x0018
     CFGID_WLANPMK = 0x0019
+
+
+class AckCode(IntEnum):
+    """Result/status codes returned in an ACK payload (not command opcodes)."""
+    CMD_ACK_OK = 0x0000
+    CMD_ACK_UNAUTH = 0x0001
+    CMD_ACK_NO_PRIVILEGE = 0x0002
+    CMD_ACK_INVALID_PARAM = 0x0003
+    CMD_ACK_CMDEXCUTE_FAILED = 0x0004
+    CMD_ACK_NONE_RESULT = 0x0005
+    CMD_ACK_UNKNOWN = 0x0006
+    CMD_ACK_ILLIGAL = 0x03E8
+
+
+class BinaryCommands(Enum):
+    # Protocol-level markers: a DRW command frame is tagged BINCMD (255) or
+    # CGICMD (254) to select the binary vs the CGI command vocabulary.
     CGICMD = 0x00FE
     BINCMD = 0x00FF
-    CMD_ACK_ILLIGAL = 0x03E8
     CMD_DEV_BROADCAST = 0x0EFF
     CMD_SYSTEM_DFTCFG_IMPORT = 0x1000
     CMD_SYSTEM_DFTCFG_EXPORT = 0x1001
@@ -234,16 +250,46 @@ class BinaryCommands(Enum):
     CMD_PASSTHROUGH_STRING_PUT = 0x50FF
     ACK_PASSTHROUGH_STRING_PUT = 0x51FF
     CMD_SESSION_CHECK = 0x55FE
-    CB_IEGET_STATUS = 0x6001
     CMD_NET_WIFISETTING_SET = 0x6001
-    CB_IEGET_PARAM = 0x6002
     CMD_NET_WIFISETTING_GET = 0x6002
-    CB_IEGET_CAM_PARAMS = 0x6003
     CMD_NET_WIFI_SCAN = 0x6003
-    CB_IEGET_LOG = 0x6004
     CMD_NET_WIREDSETTING_SET = 0x6004
-    CB_IEGET_MISC = 0x6005
     CMD_NET_WIREDSETTING_GET = 0x6005
+    ACK_NET_WIFISETTING_SET = 0x6101
+    ACK_NET_WIFISETTING_GET = 0x6102
+    ACK_NET_WIFI_SCAN = 0x6103
+    ACK_NET_WIREDSETTING_SET = 0x6104
+    ACK_NET_WIREDSETTING_GET = 0x6105
+    CMD_FRIEND_MSG = 0x7000
+    CMD_LOCAL_SESSION_INF = 0xF000
+    CMD_LOCAL_SESSION_CHECK = 0xF001
+    CMD_LOCAL_SESSION_GET = 0xF002
+    CMD_LOCAL_SESSION_CTRL = 0xF003
+    CMD_LOCAL_REC_START = 0xF004
+    CMD_LOCAL_REC_STOP = 0xF005
+    CMD_LOCAL_REC_MERGECTRL = 0xF006
+    CMD_LOCAL_P2P_START = 0xF007
+    CMD_LOCAL_P2P_STOP = 0xF008
+    CMD_SESSION_CLOSE = 0xF00F
+    CMD_LOCAL_PUSH_STRING = 0xF010
+    CMD_LOCAL_PUSH_CFG = 0xF011
+    CMD_LOCAL_RCVVID_DEC = 0xF012
+    CMD_LOCAL_LAPSED = 0xF021
+
+
+class CgiCommands(IntEnum):
+    """The alternate CGI command vocabulary (selected by the CGICMD marker).
+
+    Some A9/XD firmwares answer on these CB_* opcodes instead of the
+    BinaryCommands (BINCMD) set. They occupy an overlapping numeric range --
+    e.g. 0x6001-0x6005 collide with CMD_NET_* -- so they must live in their own
+    enum to keep value-based lookups unambiguous.
+    """
+    CB_IEGET_STATUS = 0x6001
+    CB_IEGET_PARAM = 0x6002
+    CB_IEGET_CAM_PARAMS = 0x6003
+    CB_IEGET_LOG = 0x6004
+    CB_IEGET_MISC = 0x6005
     CB_IEGET_RECORD = 0x6006
     CB_IEGET_RECORD_FILE = 0x6007
     CB_IEGET_WIFI_SCAN = 0x6008
@@ -299,29 +345,9 @@ class BinaryCommands(Enum):
     CB_APP_VERSION = 0x6054
     CB_CHECK_USER = 0x60A0
     CB_IESET_BILL = 0x60A1
-    ACK_NET_WIFISETTING_SET = 0x6101
-    ACK_NET_WIFISETTING_GET = 0x6102
-    ACK_NET_WIFI_SCAN = 0x6103
-    ACK_NET_WIREDSETTING_SET = 0x6104
-    ACK_NET_WIREDSETTING_GET = 0x6105
-    CMD_FRIEND_MSG = 0x7000
     CB_SET_P2PPARAM = 0x99F0
     CB_GET_SYSOPR = 0x99FE
     CB_SET_SYSOPR = 0x99FF
-    CMD_LOCAL_SESSION_INF = 0xF000
-    CMD_LOCAL_SESSION_CHECK = 0xF001
-    CMD_LOCAL_SESSION_GET = 0xF002
-    CMD_LOCAL_SESSION_CTRL = 0xF003
-    CMD_LOCAL_REC_START = 0xF004
-    CMD_LOCAL_REC_STOP = 0xF005
-    CMD_LOCAL_REC_MERGECTRL = 0xF006
-    CMD_LOCAL_P2P_START = 0xF007
-    CMD_LOCAL_P2P_STOP = 0xF008
-    CMD_SESSION_CLOSE = 0xF00F
-    CMD_LOCAL_PUSH_STRING = 0xF010
-    CMD_LOCAL_PUSH_CFG = 0xF011
-    CMD_LOCAL_RCVVID_DEC = 0xF012
-    CMD_LOCAL_LAPSED = 0xF021
     CB_SET_SINGLE_SETTING_DEFAULT = 0xFF01
     CB_GET_FILE = 0xFF10
     CB_PUT_FILE = 0xFF11
