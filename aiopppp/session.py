@@ -439,9 +439,32 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             self._on_device_lost()
             return
 
+    # Seconds of no video (while streaming) before we re-request it, and the
+    # further grace period before giving up on the connection.
+    VIDEO_REREQUEST_SEC = 5
+    VIDEO_DEAD_SEC = 10
+
     async def loop_step(self):
         logger.debug(f"iterate in Session for {self.dev.dev_id}")
         now = datetime.datetime.now()
+
+        # Video liveness. Applies to both protocols: a binary camera that keeps
+        # answering P2PAlive but sends no video would otherwise pass the base
+        # receive-timeout check forever and zombie. Re-request after a short
+        # gap, then disconnect if that doesn't revive the stream.
+        if (
+            self.is_video_requested and not self.video_stale_at and
+            (now - self.last_drw_pkt_at).total_seconds() > self.VIDEO_REREQUEST_SEC
+        ):
+            self.video_stale_at = self.last_drw_pkt_at
+            logger.info('No video for %ds. Re-requesting video', self.VIDEO_REREQUEST_SEC)
+            await self._request_video(1)
+        if self.video_stale_at and (now - self.video_stale_at).total_seconds() > self.VIDEO_DEAD_SEC:
+            logger.warning('No video for %ds. Disconnecting', self.VIDEO_DEAD_SEC)
+            await self.send_close_pkt()
+            self._on_device_lost()
+            return
+
         if (now - self.last_recv_at).total_seconds() > self.RECV_TIMEOUT_SEC:
             logger.warning(
                 'No packets from %s for %ds: connection is dead, disconnecting',
@@ -603,24 +626,6 @@ class JsonSession(Session):
         self.dev_properties['auth'] = auth
         logger.info('Camera properties: %s', cam_properties)
         self.device_is_ready.set()
-
-    async def loop_step(self):
-        if (
-            self.is_video_requested and not self.video_stale_at and
-            (datetime.datetime.now() - self.last_drw_pkt_at).total_seconds() > 5
-        ):
-            self.video_stale_at = self.last_drw_pkt_at
-            logger.info('No video for 5 seconds. Re-request video ')
-            await self._request_video(1)
-        if self.video_stale_at and (datetime.datetime.now() - self.video_stale_at).total_seconds() > 10:
-            # camera disconnected
-            logger.warning('No video for 10 seconds. Disconnecting')
-            await self.send_close_pkt()
-            self._on_device_lost()
-            # Session is being torn down; don't fall through to the base
-            # loop_step (which would touch the now-closed transport).
-            return
-        await super().loop_step()
 
     async def control(self, no_ack=False, **kwargs):
         idx = await self.send_command(JsonCommands.CMD_DEV_CONTROL, **kwargs)
@@ -861,9 +866,6 @@ class BinarySession(Session):
         self.dev_properties['auth'] = auth
         logger.info('Camera properties: %s', self.dev_properties)
         self.device_is_ready.set()
-
-    async def loop_step(self):
-        await super().loop_step()
 
     async def reboot(self, **kwargs):
         await self.send_command(BinaryCommands.CMD_SYSTEM_REBOOT)
