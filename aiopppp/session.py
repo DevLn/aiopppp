@@ -191,8 +191,15 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         # The transport is bound to the camera's address, so any datagram here
         # is proof of life for the dead-connection check in loop_step().
         self.last_recv_at = datetime.datetime.now()
-        decoded = ENC_METHODS[self.dev.encryption][0](data)
-        pkt = parse_packet(decoded)
+        try:
+            decoded = ENC_METHODS[self.dev.encryption][0](data)
+            pkt = parse_packet(decoded)
+        except (ValueError, struct.error, KeyError, IndexError):
+            # One malformed datagram must never raise out of the asyncio
+            # datagram callback (which would spam "Exception in callback" and,
+            # in the worst case, wedge the transport). Log and drop it.
+            logger.debug('Dropping undecodable datagram (%d bytes): [%s]', len(data), data[:16].hex(' '))
+            return
         # logger.debug(f"recv< {pkt} {pkt.get_payload()}")
         logger.debug(f"recv< {pkt.type}, len={len(pkt.get_payload())}")
         self.packet_queue.put_nowait(pkt)
@@ -208,10 +215,27 @@ class Session(PacketQueueMixin, VideoQueueMixin):
     async def send(self, pkt):
         await self.call_with_error_check(self._send(pkt))
 
+    # Cap on outstanding DRW ACK waiters. A waiter is created for every DRW we
+    # send but only removed when its ACK arrives (handle_drw_ack) or its wait
+    # times out (_wait_ack). Fire-and-forget commands (reboot, toggle_*, PTZ)
+    # never wait, so their waiters would linger; bound the dict and evict the
+    # oldest so it can never grow without limit.
+    MAX_DRW_WAITERS = 256
+
     async def _send(self, pkt):
         logger.debug(f"send> {pkt}")
         if pkt.type == PacketType.Drw:
+            existing = self.drw_waiters.get(pkt._cmd_idx)
+            if existing is not None and not existing.done():
+                # The 16-bit index wrapped back onto a still-pending waiter; that
+                # old send will never be matched now, so discard it.
+                existing.cancel()
             self.drw_waiters[pkt._cmd_idx] = asyncio.Future()
+            while len(self.drw_waiters) > self.MAX_DRW_WAITERS:
+                old_idx, old_fut = next(iter(self.drw_waiters.items()))
+                del self.drw_waiters[old_idx]
+                if not old_fut.done():
+                    old_fut.cancel()
 
         encoded_pkt = ENC_METHODS[self.dev.encryption][1](bytes(pkt))
         self.transport.sendto(encoded_pkt, (self.dev.addr, self.dev.port))
@@ -272,18 +296,61 @@ class Session(PacketQueueMixin, VideoQueueMixin):
     async def handle_drw(self, drw_pkt):
         logger.debug('handle_drw(idx=%s, chn=%s)', drw_pkt._cmd_idx, drw_pkt._channel)
         await self.send(make_drw_ack_pkt(drw_pkt))
+        self.last_drw_pkt_at = datetime.datetime.now()
+
+        if drw_pkt._channel == Channel.Video:
+            # The camera counts the DRW index independently per channel, so only
+            # video-channel packets may drive epoch/wraparound tracking. Feeding
+            # command/audio indices (which advance on their own) in here would
+            # spuriously flip video_epoch and corrupt frame reassembly by an
+            # 0x10000 index shift.
+            pkt_epoch = self._get_drw_epoch(drw_pkt)
+            if pkt_epoch > self.video_epoch:
+                logger.info('Video epoch changed %s -> %s', self.video_epoch, pkt_epoch)
+                self.video_epoch = pkt_epoch
+                self.last_drw_pkt_idx = drw_pkt._cmd_idx
+            elif self.last_drw_pkt_idx < drw_pkt._cmd_idx:
+                self.last_drw_pkt_idx = drw_pkt._cmd_idx
+
+            if self.video_stale_at:
+                logger.warning('Got video data while stale')
+                self.video_stale_at = None
+            self.video_chunk_queue.put_nowait((pkt_epoch, drw_pkt))
+        elif drw_pkt._channel == Channel.Audio:
+            await self.handle_incoming_audio_packet(drw_pkt)
+        elif drw_pkt._channel == Channel.Command:
+            await self.handle_incoming_command_packet(drw_pkt)
+
+    def _get_drw_epoch(self, drw_pkt):
+        if self.last_drw_pkt_idx > 0xff00 and drw_pkt._cmd_idx < 0x100:
+            return self.video_epoch + 1
+        if self.video_epoch and self.last_drw_pkt_idx < 0x100 and drw_pkt._cmd_idx > 0xff00:
+            return self.video_epoch - 1
+        return self.video_epoch
+
+    async def handle_incoming_command_packet(self, drw_pkt):
+        pass
+
+    async def handle_incoming_audio_packet(self, drw_pkt):
+        pass
+
+    def _reset_cmd_waiter(self, cmd):
+        # Replace any pending response future for this command. Without this a
+        # second request whose first response never arrived would silently
+        # orphan the old future (and its awaiter would hang until timeout).
+        old = self.cmd_waiters.get(cmd.value)
+        if old is not None and not old.done():
+            old.cancel()
+        fut = asyncio.Future()
+        self.cmd_waiters[cmd.value] = fut
+        return fut
 
     async def handle_drw_ack(self, pkt):
         cmd_idx_ack = int.from_bytes(pkt.get_payload()[4:6], 'big')
         logger.debug('handle_drw_ack(idx=%s)', cmd_idx_ack)
-        # logger.info('waiters: %s', self.drw_waiters)
-        if cmd_idx_ack in self.drw_waiters:
-            # logger.info(
-            #     'Got ACK for %d, proceed waiters, total waiters: %d', cmd_idx_ack, len(self.drw_waiters),
-            # )
-            self.drw_waiters[cmd_idx_ack].set_result(pkt)
-            await asyncio.sleep(0)
-            del self.drw_waiters[cmd_idx_ack]
+        fut = self.drw_waiters.pop(cmd_idx_ack, None)
+        if fut is not None and not fut.done():
+            fut.set_result(pkt)
 
     async def wait_ack(self, idx, timeout=5):
         return await self.call_with_error_check(self._wait_ack(idx, timeout))
@@ -400,6 +467,9 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             return
         logger.info('Stopping task for %s', self.dev.dev_id)
         self.device_is_ready.set()
+        reassert_task = getattr(self, '_reassert_task', None)
+        if reassert_task and not reassert_task.done():
+            reassert_task.cancel()
         if self.process_packet_task:
             self.process_packet_task.cancel()
         if self.process_video_task:
@@ -454,7 +524,7 @@ class JsonSession(Session):
         self.outgoing_command_idx = (self.outgoing_command_idx + 1) & 0xFFFF
         pkt = JsonCmdPkt(pkt_idx, {**data, **kwargs, **self.get_common_data()})
         if with_response:
-            self.cmd_waiters[cmd.value] = asyncio.Future()
+            self._reset_cmd_waiter(cmd)
         await self.send(pkt)
         return pkt_idx
 
@@ -469,38 +539,6 @@ class JsonSession(Session):
     async def _request_video(self, mode):
         logger.info('Request video %s', mode)
         await self.send_command(JsonCommands.CMD_STREAM, video=mode)
-
-    def _get_drw_epoch(self, drw_pkt):
-        if self.last_drw_pkt_idx > 0xff00 and drw_pkt._cmd_idx < 0x100:
-            return self.video_epoch + 1
-        if self.video_epoch and self.last_drw_pkt_idx < 0x100 and drw_pkt._cmd_idx > 0xff00:
-            return self.video_epoch - 1
-        return self.video_epoch
-
-    async def handle_drw(self, drw_pkt):
-        await super().handle_drw(drw_pkt)
-        self.last_drw_pkt_at = datetime.datetime.now()
-
-        # # 0x10000 - max number of chunks in one epoch,we need to keep order of chunks
-        pkt_epoch = self._get_drw_epoch(drw_pkt)
-
-        if pkt_epoch > self.video_epoch:
-            logger.info('Video epoch changed %s -> %s', self.video_epoch, pkt_epoch)
-            self.video_epoch = pkt_epoch
-            self.last_drw_pkt_idx = drw_pkt._cmd_idx
-        elif self.last_drw_pkt_idx < drw_pkt._cmd_idx:
-            self.last_drw_pkt_idx = drw_pkt._cmd_idx
-
-        if drw_pkt._channel == Channel.Video:
-            # logger.debug(f'Got video data {drw_pkt.get_drw_payload()}')
-            if self.video_stale_at:
-                logger.warning('Got video data while stale')
-                self.video_stale_at = None
-            self.video_chunk_queue.put_nowait((pkt_epoch, drw_pkt))
-        elif drw_pkt._channel == Channel.Audio:
-            pass
-        elif drw_pkt._channel == Channel.Command:
-            await self.handle_incoming_command_packet(drw_pkt)
 
     async def handle_incoming_command_packet(self, drw_pkt):
         if isinstance(drw_pkt, JsonCmdPkt):
@@ -637,44 +675,13 @@ class BinarySession(Session):
         self.auth_login = login or self.DEFAULT_LOGIN
         self.auth_password = password or self.DEFAULT_PASSWORD
         self.ticket = b'\x00' * 4
+        self._reassert_task = None
 
     async def send_initial_packets(self):
         pkt = make_punch_pkt(self.dev.dev_id)
         await self.send(pkt)
         pkt.type = PacketType.P2pRdy
         await self.send(pkt)
-
-    async def handle_drw(self, drw_pkt):
-        await super().handle_drw(drw_pkt)
-        self.last_drw_pkt_at = datetime.datetime.now()
-
-        # # 0x10000 - max number of chunks in one epoch,we need to keep order of chunks
-        pkt_epoch = self._get_drw_epoch(drw_pkt)
-
-        if pkt_epoch > self.video_epoch:
-            logger.info('Video epoch changed %s -> %s', self.video_epoch, pkt_epoch)
-            self.video_epoch = pkt_epoch
-            self.last_drw_pkt_idx = drw_pkt._cmd_idx
-        elif self.last_drw_pkt_idx < drw_pkt._cmd_idx:
-            self.last_drw_pkt_idx = drw_pkt._cmd_idx
-
-        if drw_pkt._channel == Channel.Video:
-            # logger.debug(f'Got video data {drw_pkt.get_drw_payload()}')
-            if self.video_stale_at:
-                logger.warning('Got video data while stale')
-                self.video_stale_at = None
-            self.video_chunk_queue.put_nowait((pkt_epoch, drw_pkt))
-        elif drw_pkt._channel == Channel.Audio:
-            pass
-        elif drw_pkt._channel == Channel.Command:
-            await self.handle_incoming_command_packet(drw_pkt)
-
-    def _get_drw_epoch(self, drw_pkt):
-        if self.last_drw_pkt_idx > 0xff00 and drw_pkt._cmd_idx < 0x100:
-            return self.video_epoch + 1
-        if self.video_epoch and self.last_drw_pkt_idx < 0x100 and drw_pkt._cmd_idx > 0xff00:
-            return self.video_epoch - 1
-        return self.video_epoch
 
     async def handle_incoming_command_packet(self, drw_pkt):
         if isinstance(drw_pkt, BinaryCmdPkt):
@@ -708,7 +715,7 @@ class BinarySession(Session):
             self.ticket,
         )
         if with_response:
-            self.cmd_waiters[cmd.value] = asyncio.Future()
+            self._reset_cmd_waiter(cmd)
         await self.send(pkt)
         return pkt_idx
 
@@ -763,44 +770,56 @@ class BinarySession(Session):
 
         if mode:
             for video_param in video_params:
-                await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, video_param, with_response=True)
-            await self.send_command(BinaryCommands.CMD_PEER_LIVEVIDEO_START, b'', with_response=True)
+                await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, video_param)
+            await self.send_command(BinaryCommands.CMD_PEER_LIVEVIDEO_START, b'')
             # The camera adaptively drops the resolution a few seconds after the
             # stream starts and ignores the resolution we set at start time.
             # Re-asserting it mid-stream (which is what re-selecting it in the UI
-            # does) makes it stick, so schedule a delayed re-send.
-            asyncio.create_task(self._reassert_video_params(video_params))
+            # does) makes it stick, so schedule a delayed re-send. Keep a handle
+            # so it can't be garbage-collected mid-flight and is cancelled on stop.
+            if self._reassert_task and not self._reassert_task.done():
+                self._reassert_task.cancel()
+            self._reassert_task = asyncio.create_task(self._reassert_video_params(video_params))
         else:
-            await self.send_command(BinaryCommands.CMD_PEER_LIVEVIDEO_STOP, b'', with_response=True)
+            await self.send_command(BinaryCommands.CMD_PEER_LIVEVIDEO_STOP, b'')
 
     async def _reassert_video_params(self, video_params, delay=5):
         """Re-send the resolution a few seconds in to lock it (camera ignores
         the value set at stream start and self-downgrades otherwise)."""
-        await asyncio.sleep(delay)
-        if not self.is_video_requested or self.transport is None:
-            return
-        logger.info('%s: re-asserting video params to lock resolution', self.dev.dev_id)
         try:
+            await asyncio.sleep(delay)
+            if not self.is_video_requested or self.transport is None:
+                return
+            logger.info('%s: re-asserting video params to lock resolution', self.dev.dev_id)
             for video_param in video_params:
-                await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, video_param, with_response=True)
+                await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, video_param)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.debug('Re-assert video params failed', exc_info=True)
 
     @staticmethod
     def _build_video_param(param_type, value):
         if isinstance(param_type, VideoParamType):
-            param = param_type
+            param = param_type.value
+            name = param_type.name.replace('VIDEO_PARAM_TYPE_', '')
         else:
-            param = VideoParamType[f'VIDEO_PARAM_TYPE_{param_type.upper()}'].value
+            name = str(param_type).upper()
+            param = VideoParamType[f'VIDEO_PARAM_TYPE_{name}'].value
 
-        if isinstance(value, str):
-            value = globals()[f'Video{param_type.capitalize()}'][f'VIDEO_{param_type.upper()}_{value.upper()}'].value
+        if isinstance(value, Enum):
+            value = value.value
+        elif isinstance(value, str):
+            # Resolve a symbolic value (e.g. 'HD') against the matching
+            # Video<Name> enum, e.g. VideoResolution.VIDEO_RESOLUTION_HD.
+            enum_cls = globals()[f'Video{name.capitalize()}']
+            value = enum_cls[f'VIDEO_{name}_{value.upper()}'].value
 
         return struct.pack('<II', param, value)
 
     async def set_video_param(self, name, value):
         payload = self._build_video_param(name, value)
-        await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, payload, with_response=True)
+        await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, payload)
 
     async def login(self):
         # type is char account[0x20]; char password[0x80];
