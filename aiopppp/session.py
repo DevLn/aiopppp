@@ -920,9 +920,24 @@ class BinarySession(Session):
         await asyncio.sleep(0.2)
         await self.rotate_stop()
 
+    async def ptz_goto_preset(self, index, **kwargs):
+        """Move to a stored PTZ preset position."""
+        logger.info('%s: goto PTZ preset %s', self.dev.dev_id, index)
+        data = self._pack_ptz_dir_cmd(PtzDirection.PTZ_DIRECTION_PRE_TO, index)
+        await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
+
+    async def ptz_set_preset(self, index, **kwargs):
+        """Store the current position as a PTZ preset."""
+        logger.info('%s: save PTZ preset %s', self.dev.dev_id, index)
+        data = self._pack_ptz_dir_cmd(PtzDirection.PTZ_DIRECTION_PRE_REC, index)
+        await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
+
     @staticmethod
-    def _pack_ptz_dir_cmd(ptz: PtzDirection) -> bytes:
-        data = struct.pack('>III', PtzParamType.PTZ_PARAM_TYPE_DIRECTION, ptz, 0)
+    def _pack_ptz_dir_cmd(ptz: PtzDirection, index: int = 0) -> bytes:
+        # The passthrough PTZ frame is (param_type, direction, arg). For plain
+        # moves arg is 0; for presets the direction is PRE_TO/PRE_REC and arg is
+        # the preset index.
+        data = struct.pack('>III', PtzParamType.PTZ_PARAM_TYPE_DIRECTION, int(ptz), index)
         return pack_passtrough_cmd(BinaryCommands.CMD_PTZ_SET.value, data)
 
 
