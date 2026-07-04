@@ -57,9 +57,10 @@ async def create_udp_server(port, on_receive):
 
 
 class BinaryCamera:
-    def __init__(self):
+    def __init__(self, port=32108, dev_id=None):
         self.transport = None
-        self.dev_id = DeviceID('TEST',123456, 'CAMERA')
+        self.port = port
+        self.dev_id = dev_id or DeviceID('TEST',123456, 'CAMERA')
         self.input = asyncio.Queue()
         self.output = asyncio.Queue()
         self.client_addr = None
@@ -234,14 +235,16 @@ class BinaryCamera:
             self.input.task_done()
 
     async def run(self):
-        self.transport = await create_udp_server(32108, self.on_receive)
+        self.transport = await create_udp_server(self.port, self.on_receive)
         out_t = asyncio.create_task(self.send_task())
         in_t = asyncio.create_task(self.receive_task())
         await asyncio.gather(*[out_t, in_t])
 
 
 async def main():
-    camera = BinaryCamera()
+    import sys
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 32108
+    camera = BinaryCamera(port=port)
     await camera.run()
 
 
