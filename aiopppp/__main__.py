@@ -28,10 +28,15 @@ def notify_new_device():
 
 
 def on_device_found(device, login, password):
+    dev_id = device.dev_id.dev_id
+    if dev_id in SESSIONS:
+        # Discovery re-finds already-connected cameras every cycle; creating a
+        # new session here would leak the previous one's running tasks.
+        return
     session = make_session(device, on_device_lost=on_device_lost, login=login, password=password)
-    SESSIONS[device.dev_id.dev_id] = session
+    SESSIONS[dev_id] = session
     session.start()
-    tasks[device.dev_id.dev_id] = session.running_tasks()
+    tasks[dev_id] = session.running_tasks()
     notify_new_device()
 
 

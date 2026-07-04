@@ -143,6 +143,12 @@ class VideoQueueMixin:
 
 
 class Session(PacketQueueMixin, VideoQueueMixin):
+    # If no packet arrives from the camera for this many seconds, treat the
+    # connection as dead and tear it down. Works for both JSON and binary
+    # cameras (binary has no other liveness check), and catches a silently
+    # dropped peer that would otherwise leave a zombie session.
+    RECV_TIMEOUT_SEC = 20
+
     def __init__(self, dev, on_disconnect, *args, on_video_state_change=None, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -156,6 +162,7 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         self.video_stale_at = None
         self.last_alive_pkt_at = datetime.datetime.now()
         self.last_drw_pkt_at = datetime.datetime.now()
+        self.last_recv_at = datetime.datetime.now()
         self.on_disconnect = on_disconnect
         # Called with the new is_video_requested value whenever streaming
         # starts or stops (including when the session is torn down).
@@ -181,6 +188,9 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         return transport
 
     def on_receive(self, data):
+        # The transport is bound to the camera's address, so any datagram here
+        # is proof of life for the dead-connection check in loop_step().
+        self.last_recv_at = datetime.datetime.now()
         decoded = ENC_METHODS[self.dev.encryption][0](data)
         pkt = parse_packet(decoded)
         # logger.debug(f"recv< {pkt} {pkt.get_payload()}")
@@ -308,7 +318,17 @@ class Session(PacketQueueMixin, VideoQueueMixin):
         await self.send_initial_packets()
 
         try:
-            await asyncio.wait_for(self._p2p_rdy_debouncer.wait(), timeout=10)
+            try:
+                await asyncio.wait_for(self._p2p_rdy_debouncer.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                # Camera answered discovery but never completed the P2pRdy
+                # handshake (common when it is flaky/half-wedged). Treat it as a
+                # lost device rather than letting an unhandled exception escape
+                # and take the whole process down.
+                logger.warning('%s did not become ready (no P2pRdy), disconnecting', self.dev.dev_id)
+                await self.send_close_pkt()
+                self._on_device_lost()
+                return
             logger.info('Connected to %s at %s, json=%s', self.dev.dev_id, self.dev.addr, self.dev.is_json)
             self.state = State.CONNECTED
             try:
@@ -327,11 +347,30 @@ class Session(PacketQueueMixin, VideoQueueMixin):
                 logger.debug('Session main task cancelled, sending close packet')
                 await self.send_close_pkt()
             raise
+        except Exception:
+            # A single session must never crash the whole process. Log it, tear
+            # the session down, and let discovery/HA reconnect.
+            logger.exception('Session for %s failed; disconnecting', self.dev.dev_id)
+            try:
+                await self.send_close_pkt()
+            except Exception:
+                pass
+            self._on_device_lost()
+            return
 
     async def loop_step(self):
         logger.debug(f"iterate in Session for {self.dev.dev_id}")
-        if (datetime.datetime.now() - self.last_alive_pkt_at).total_seconds() > 10:
-            self.last_alive_pkt_at = datetime.datetime.now()
+        now = datetime.datetime.now()
+        if (now - self.last_recv_at).total_seconds() > self.RECV_TIMEOUT_SEC:
+            logger.warning(
+                'No packets from %s for %ds: connection is dead, disconnecting',
+                self.dev.dev_id, self.RECV_TIMEOUT_SEC,
+            )
+            await self.send_close_pkt()
+            self._on_device_lost()
+            return
+        if (now - self.last_alive_pkt_at).total_seconds() > 10:
+            self.last_alive_pkt_at = now
             logger.info('Send P2PAlive')
             await self.send(make_p2palive_pkt())
 
@@ -352,9 +391,12 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             self.on_disconnect(self.dev)
 
     def stop(self):
-        if self.state == State.DISCONNECTED:
-            # Already stopped: stop() is reachable from _on_device_lost(),
+        if self.state == State.DISCONNECTED and self.transport is None:
+            # Already fully stopped. stop() is reachable from _on_device_lost(),
             # Device.close() and the CLI shutdown loop, so it must be idempotent.
+            # Note: a session that started connecting but never reached CONNECTED
+            # (e.g. P2pRdy timeout) is still DISCONNECTED but has a live transport
+            # and queue tasks, so we must fall through and clean those up.
             return
         logger.info('Stopping task for %s', self.dev.dev_id)
         self.device_is_ready.set()
@@ -523,6 +565,9 @@ class JsonSession(Session):
             logger.warning('No video for 10 seconds. Disconnecting')
             await self.send_close_pkt()
             self._on_device_lost()
+            # Session is being torn down; don't fall through to the base
+            # loop_step (which would touch the now-closed transport).
+            return
         await super().loop_step()
 
     async def control(self, no_ack=False, **kwargs):
