@@ -583,10 +583,12 @@ class JsonSession(Session):
     async def handle_incoming_command_packet(self, drw_pkt):
         if isinstance(drw_pkt, JsonCmdPkt):
             response = drw_pkt.json_payload
-            if response['cmd'] in self.cmd_waiters:
-                # logger.debug('Got awaited response %s', response)
-                self.cmd_waiters[response['cmd']].set_result(response)
-                del self.cmd_waiters[response['cmd']]
+            fut = self.cmd_waiters.get(response['cmd'])
+            # Resolve but don't remove the waiter here: wait_cmd_result looks it
+            # up by key *after* wait_ack, so popping now would lose a result that
+            # arrives before the caller starts awaiting it.
+            if fut is not None and not fut.done():
+                fut.set_result(response)
 
     async def wait_cmd_result(self, cmd, timeout=5):
         return await self.call_with_error_check(self._wait_cmd_result(cmd, timeout))
@@ -594,7 +596,10 @@ class JsonSession(Session):
     async def _wait_cmd_result(self, cmd, timeout=5):
         fut = self.cmd_waiters.get(cmd.value)
         if fut:
-            res = await asyncio.wait_for(fut, timeout=timeout)
+            try:
+                res = await asyncio.wait_for(fut, timeout=timeout)
+            finally:
+                self.cmd_waiters.pop(cmd.value, None)
             logger.debug('Got command result %s', res)
             return res
         return {'result': -1}
@@ -752,10 +757,14 @@ class BinarySession(Session):
             )
 
             if drw_pkt.command in self.REV_ACKS:
-                waiter = self.cmd_waiters.pop(self.REV_ACKS[drw_pkt.command].value, None)
-                # logger.info(f'{drw_pkt.command=} {self.REV_ACKS[drw_pkt.command]=} {waiter=} {drw_pkt.cmd_payload=}')
-                if waiter:
-                    waiter.set_result(drw_pkt.cmd_payload)
+                # Resolve but keep the waiter; wait_cmd_result pops it after
+                # awaiting. Popping here races an ACK that arrives during the
+                # preceding wait_ack, which would drop the result (e.g. a camera
+                # that answers a snapshot/status request instantly).
+                key = self.REV_ACKS[drw_pkt.command].value
+                fut = self.cmd_waiters.get(key)
+                if fut is not None and not fut.done():
+                    fut.set_result(drw_pkt.cmd_payload)
 
     async def send_command(self, cmd, cmd_payload=b'', *, with_response=False, **kwargs):
         pkt_idx = self.outgoing_command_idx
@@ -776,7 +785,10 @@ class BinarySession(Session):
     async def wait_cmd_result(self, cmd, timeout=5):
         fut = self.cmd_waiters.get(cmd.value)
         if fut:
-            res = await asyncio.wait_for(fut, timeout=timeout)
+            try:
+                res = await asyncio.wait_for(fut, timeout=timeout)
+            finally:
+                self.cmd_waiters.pop(cmd.value, None)
             logger.debug('Got command result %s', res)
             return res
         return b''
