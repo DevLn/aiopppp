@@ -765,8 +765,26 @@ class BinarySession(Session):
             for video_param in video_params:
                 await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, video_param, with_response=True)
             await self.send_command(BinaryCommands.CMD_PEER_LIVEVIDEO_START, b'', with_response=True)
+            # The camera adaptively drops the resolution a few seconds after the
+            # stream starts and ignores the resolution we set at start time.
+            # Re-asserting it mid-stream (which is what re-selecting it in the UI
+            # does) makes it stick, so schedule a delayed re-send.
+            asyncio.create_task(self._reassert_video_params(video_params))
         else:
             await self.send_command(BinaryCommands.CMD_PEER_LIVEVIDEO_STOP, b'', with_response=True)
+
+    async def _reassert_video_params(self, video_params, delay=5):
+        """Re-send the resolution a few seconds in to lock it (camera ignores
+        the value set at stream start and self-downgrades otherwise)."""
+        await asyncio.sleep(delay)
+        if not self.is_video_requested or self.transport is None:
+            return
+        logger.info('%s: re-asserting video params to lock resolution', self.dev.dev_id)
+        try:
+            for video_param in video_params:
+                await self.send_command(BinaryCommands.CMD_PEER_VIDEOPARAM_SET, video_param, with_response=True)
+        except Exception:
+            logger.debug('Re-assert video params failed', exc_info=True)
 
     @staticmethod
     def _build_video_param(param_type, value):
