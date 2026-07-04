@@ -36,6 +36,9 @@ from .utils import DebounceEvent
 
 logger = logging.getLogger(__name__)
 
+# Prefix of the 0x20-byte header that marks the first chunk of a video frame.
+VIDEO_MARKER = b'\x55\xaa\x15\xa8'
+
 
 class State(Enum):
     DISCONNECTED = 0
@@ -85,6 +88,12 @@ class VideoQueueMixin:
         self.video_received = {}
         self.video_boundaries = set()
         self.last_video_frame = -1
+        # The frame currently being assembled is delimited by the top two
+        # boundaries. We track that window and the set of still-missing chunk
+        # indices in it incrementally, so completeness is an O(1) set update per
+        # chunk instead of an O(frame) rescan (which was O(frame^2) per frame).
+        self._frame_window = (None, None)
+        self._frame_missing = set()
 
     async def process_video_queue(self):
         while True:
@@ -97,49 +106,52 @@ class VideoQueueMixin:
     async def handle_incoming_video_packet(self, pkt_epoch, pkt):
         video_payload = pkt.get_drw_payload()
         # logger.info(f'- video frame {pkt._cmd_idx}')
-        video_marker = b'\x55\xaa\x15\xa8'  # next \x03 - video marker
 
         video_chunk_idx = pkt._cmd_idx + 0x10000 * pkt_epoch
 
         # 0x20 - size of the header starting with this magic
-        if video_payload.startswith(video_marker):
+        if video_payload.startswith(VIDEO_MARKER):
             self.video_boundaries.add(video_chunk_idx)
             self.video_received[video_chunk_idx] = video_payload[0x20:]
         else:
             self.video_received[video_chunk_idx] = video_payload
-        await self.process_video_frame()
+        await self.process_video_frame(video_chunk_idx)
 
-    async def process_video_frame(self):
+    async def process_video_frame(self, new_idx=None):
         if len(self.video_boundaries) <= 1:
             return
+        # After pruning, video_boundaries only holds the current pending pair
+        # (plus any freshly-arrived higher boundary), so this sort is over a
+        # handful of items.
         frame_starts = sorted(self.video_boundaries)
         index = frame_starts[-2]
         last_index = frame_starts[-1]
 
-        if index != self.last_video_frame:
-            # Cheap completeness check: stop at the first gap instead of building
-            # the payload (and the diagnostic string) on every incoming chunk.
-            complete = all(i in self.video_received for i in range(index, last_index))
-            if logger.isEnabledFor(logging.DEBUG):
-                completeness = ''.join(
-                    'x' if i in self.video_received else '_'
-                    for i in range(index, last_index)
-                )
-                logger.debug(f".. completeness: {completeness}")
+        if (index, last_index) != self._frame_window:
+            # The frame window advanced. Recompute the missing set and drop
+            # everything below the new frame start. Both are O(frame) but run
+            # once per frame here, not once per incoming chunk.
+            self._frame_window = (index, last_index)
+            self._frame_missing = {i for i in range(index, last_index) if i not in self.video_received}
+            for idx in [i for i in self.video_received if i < index]:
+                del self.video_received[idx]
+            for idx in [i for i in self.video_boundaries if i < index]:
+                self.video_boundaries.discard(idx)
+        elif new_idx is not None:
+            # Same window: the chunk we just stored may have filled a gap.
+            self._frame_missing.discard(new_idx)
 
-            if complete:
-                self.last_video_frame = index
-                data = b''.join(self.video_received[i] for i in range(index, last_index))
-                await self.frame_buffer.publish(VideoFrame(idx=index, data=data))
+        if index != self.last_video_frame and not self._frame_missing:
+            self.last_video_frame = index
+            data = b''.join(self.video_received[i] for i in range(index, last_index))
+            await self.frame_buffer.publish(VideoFrame(idx=index, data=data))
 
-        # Only the last two boundaries are ever assembled, so chunks/boundaries
-        # below the current frame start can never be published. Drop them on
-        # every call (not just on completion) so a permanently incomplete frame
-        # from packet loss can't make these buffers grow without bound.
-        for idx in [i for i in self.video_received if i < index]:
-            del self.video_received[idx]
-        for idx in [i for i in self.video_boundaries if i < index]:
-            self.video_boundaries.remove(idx)
+        if logger.isEnabledFor(logging.DEBUG):
+            completeness = ''.join(
+                'x' if i in self.video_received else '_'
+                for i in range(index, last_index)
+            )
+            logger.debug('.. completeness: %s', completeness)
 
 
 class Session(PacketQueueMixin, VideoQueueMixin):
@@ -283,6 +295,8 @@ class Session(PacketQueueMixin, VideoQueueMixin):
             self.video_boundaries = set()
             self.video_epoch = 0
             self.last_video_frame = -1
+            self._frame_window = (None, None)
+            self._frame_missing = set()
             while not self.video_chunk_queue.empty():
                 self.video_chunk_queue.get_nowait()
             await self._request_video(0)
