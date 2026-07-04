@@ -686,6 +686,10 @@ class BinarySession(Session):
         BinaryCommands.CMD_PEER_LIVEVIDEO_START: BinaryCommands.ACK_PEER_LIVEVIDEO_START,
         BinaryCommands.CMD_PEER_LIVEVIDEO_STOP: BinaryCommands.ACK_PEER_LIVEVIDEO_STOP,
         BinaryCommands.CMD_SYSTEM_STATUS_GET: BinaryCommands.ACK_SYSTEM_STATUS_GET,
+        BinaryCommands.CMD_PEER_IRCUT_ONOFF: BinaryCommands.ACK_PEER_IRCUT_ONOFF,
+        BinaryCommands.CMD_PEER_LIGHTFILL_ONOFF: BinaryCommands.ACK_PEER_LIGHTFILL_ONOFF,
+        BinaryCommands.CMD_SYSTEM_REBOOT: BinaryCommands.ACK_SYSTEM_REBOOT,
+        BinaryCommands.CMD_SNAPSHOT_GET: BinaryCommands.ACK_SNAPSHOT_GET,
     }
     REV_ACKS = {v: k for k, v in ACKS.items()}
 
@@ -867,20 +871,40 @@ class BinarySession(Session):
         logger.info('Camera properties: %s', self.dev_properties)
         self.device_is_ready.set()
 
+    @staticmethod
+    def _onoff_payload(value):
+        # The *_ONOFF commands carry the desired state as a little-endian int
+        # (an IntegerBean in the vendor SDK), so we can set an explicit on/off
+        # state instead of blind-toggling.
+        return struct.pack('<I', 1 if value else 0)
+
     async def reboot(self, **kwargs):
         await self.send_command(BinaryCommands.CMD_SYSTEM_REBOOT)
 
     async def reset(self, **kwargs):
-        pass
+        """Reset to factory defaults via the default-config recovery command."""
+        await self.send_command(BinaryCommands.CMD_SYSTEM_DFTCFG_RECOVERY)
 
     async def toggle_whitelight(self, value, **kwargs):
-        await self.send_command(BinaryCommands.CMD_PEER_LIGHTFILL_ONOFF)
+        logger.info('%s: white light = %s', self.dev.dev_id, value)
+        await self.send_command(BinaryCommands.CMD_PEER_LIGHTFILL_ONOFF, self._onoff_payload(value))
 
     async def toggle_ir(self, value, **kwargs):
-        await self.send_command(BinaryCommands.CMD_PEER_IRCUT_ONOFF)
+        logger.info('%s: IR = %s', self.dev.dev_id, value)
+        # IR is also settable through the video-param channel; the dedicated
+        # ONOFF command is the direct equivalent of the app's night-mode switch.
+        await self.send_command(BinaryCommands.CMD_PEER_IRCUT_ONOFF, self._onoff_payload(value))
 
     async def toggle_lamp(self, value, **kwargs):
-        pass
+        # Binary cameras expose the fill light as the "lamp"; route it there.
+        await self.toggle_whitelight(value, **kwargs)
+
+    async def get_snapshot(self, timeout=5):
+        """Request a still image. Returns the raw ACK payload (JPEG bytes on
+        cameras that answer inline); exact framing is device-specific."""
+        idx = await self.send_command(BinaryCommands.CMD_SNAPSHOT_GET, b'', with_response=True)
+        await self.wait_ack(idx)
+        return await self.wait_cmd_result(BinaryCommands.CMD_SNAPSHOT_GET, timeout=timeout)
 
     async def rotate_start(self, value, **kwargs):
         ptz = PtzDirection[f'PTZ_DIRECTION_{value.upper()}'].value
