@@ -152,7 +152,9 @@ def parse_dev_status(data):
     return {
         'tz': f"UTC{time_zone // 3600:+d}", #time zone is in seconds
         'uptime': sys_uptime,
-        'dbm': sys_uptime, #not sure if that is wifi dbm or system uptime
+        # Real Wi-Fi signal strength is not identified in this 124-byte struct;
+        # don't masquerade the uptime as dBm (it produced bogus signal readings).
+        'dbm': None,
         'devName': dev_name.decode('ascii', errors='ignore').rstrip('\0'),
         'sdStatus': sd_status,
         'p2pStatus': p2p_status,

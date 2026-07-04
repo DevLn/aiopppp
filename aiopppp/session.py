@@ -691,6 +691,15 @@ class BinarySession(Session):
         BinaryCommands.CMD_SYSTEM_REBOOT: BinaryCommands.ACK_SYSTEM_REBOOT,
         BinaryCommands.CMD_SNAPSHOT_GET: BinaryCommands.ACK_SNAPSHOT_GET,
         BinaryCommands.CMD_PEER_VIDEOPARAM_GET: BinaryCommands.ACK_PEER_VIDEOPARAM_GET,
+        BinaryCommands.CMD_SYSTEM_INF_GET: BinaryCommands.ACK_SYSTEM_INF_GET,
+        BinaryCommands.CMD_SYSTEM_ALIAS_SET: BinaryCommands.ACK_SYSTEM_ALIAS_SET,
+        BinaryCommands.CMD_SYSTEM_DATETIME_GET: BinaryCommands.ACK_SYSTEM_DATETIME_GET,
+        BinaryCommands.CMD_SYSTEM_DATETIME_SET: BinaryCommands.ACK_SYSTEM_DATETIME_SET,
+        BinaryCommands.CMD_SYSTEM_USER_GET: BinaryCommands.ACK_SYSTEM_USER_GET,
+        BinaryCommands.CMD_NET_WIFISETTING_GET: BinaryCommands.ACK_NET_WIFISETTING_GET,
+        BinaryCommands.CMD_NET_WIFISETTING_SET: BinaryCommands.ACK_NET_WIFISETTING_SET,
+        BinaryCommands.CMD_NET_WIFI_SCAN: BinaryCommands.ACK_NET_WIFI_SCAN,
+        BinaryCommands.CMD_NET_WIREDSETTING_GET: BinaryCommands.ACK_NET_WIREDSETTING_GET,
     }
     REV_ACKS = {v: k for k, v in ACKS.items()}
 
@@ -916,6 +925,55 @@ class BinarySession(Session):
         await self.wait_ack(idx)
         status_result = await self.wait_cmd_result(BinaryCommands.CMD_SYSTEM_STATUS_GET)
         return {**parse_dev_status(status_result), 'raw': status_result.hex(' ')}
+
+    async def _request(self, cmd, payload=b'', timeout=5):
+        """Send a command that expects a response and return its raw ACK
+        payload (b'' on timeout/no-answer)."""
+        idx = await self.send_command(cmd, payload, with_response=True)
+        await self.wait_ack(idx)
+        return await self.wait_cmd_result(cmd, timeout=timeout)
+
+    async def get_device_info(self, timeout=5):
+        """Fetch the extended device-info block (CMD_SYSTEM_INF_GET). Returned
+        as raw bytes -- the struct layout is firmware-specific and unverified."""
+        return await self._request(BinaryCommands.CMD_SYSTEM_INF_GET, timeout=timeout)
+
+    async def set_alias(self, name):
+        """Set the camera's display name/alias."""
+        payload = struct.pack('<64s', name.encode('utf-8')[:64])
+        await self.send_command(BinaryCommands.CMD_SYSTEM_ALIAS_SET, payload)
+
+    async def get_datetime(self, timeout=5):
+        return await self._request(BinaryCommands.CMD_SYSTEM_DATETIME_GET, timeout=timeout)
+
+    async def set_datetime(self, when=None, tz_seconds=0):
+        """Set the device clock. Sends a unix timestamp plus timezone offset in
+        seconds. The exact wire layout is unverified against hardware."""
+        if when is None:
+            when = datetime.datetime.now()
+        ts = int(when.timestamp())
+        payload = struct.pack('<ii', ts, int(tz_seconds))
+        await self.send_command(BinaryCommands.CMD_SYSTEM_DATETIME_SET, payload)
+
+    async def get_users(self, timeout=5):
+        return await self._request(BinaryCommands.CMD_SYSTEM_USER_GET, timeout=timeout)
+
+    async def get_wifi_settings(self, timeout=5):
+        return await self._request(BinaryCommands.CMD_NET_WIFISETTING_GET, timeout=timeout)
+
+    async def set_wifi(self, ssid, password, enabled=True):
+        """Provision the camera's Wi-Fi station credentials. Wire layout is a
+        best-effort ssid[32]/password[64]/enabled block and unverified."""
+        payload = struct.pack('<32s64sI', ssid.encode('utf-8')[:32],
+                              password.encode('utf-8')[:64], 1 if enabled else 0)
+        await self.send_command(BinaryCommands.CMD_NET_WIFISETTING_SET, payload)
+
+    async def scan_wifi(self, timeout=10):
+        """Trigger a Wi-Fi scan and return the raw result list."""
+        return await self._request(BinaryCommands.CMD_NET_WIFI_SCAN, timeout=timeout)
+
+    async def get_wired_settings(self, timeout=5):
+        return await self._request(BinaryCommands.CMD_NET_WIREDSETTING_GET, timeout=timeout)
 
     async def setup_device(self):
         auth = await self.login()
