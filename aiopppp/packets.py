@@ -73,11 +73,20 @@ class JsonCmdPkt(DrwPkt):
 
 def xq_bytes_encode(data, shift):
     new_buf = bytes(b - 1 if b & 1 else b + 1 for b in data)
+    if not new_buf:
+        return b''
+    # The rotation is modulo the buffer length; a raw shift larger than the
+    # payload (e.g. shift=4 on a 1-3 byte payload) would otherwise rotate by the
+    # wrong amount and fail to round-trip with xq_bytes_decode.
+    shift %= len(new_buf)
     return bytes(new_buf[shift:] + new_buf[:shift])
 
 
 def xq_bytes_decode(data, shift):
     new_buf = bytes(b - 1 if b & 1 else b + 1 for b in data)
+    if not new_buf:
+        return b''
+    shift %= len(new_buf)
     return bytes(new_buf[-shift:] + new_buf[:-shift])
 
 def _inet_btoa(b: bytes) -> str:
@@ -299,7 +308,14 @@ def parse_packet(data):
                 'Invalid pkt length: pkt.len=%d, real length=%d, [%s]',
                 length, len(data) - 4, data.hex(' '))
 
-    pkt_class, parse_func = PARSERS.get(PacketType(typ), (Packet, None))
+    try:
+        packet_type = PacketType(typ)
+    except ValueError:
+        # A corrupt or unrecognized datagram must not raise out of the UDP
+        # receive callback; surface it as ValueError so callers drop it.
+        raise ValueError(f'Unknown packet type 0x{typ:02x}')
+
+    pkt_class, parse_func = PARSERS.get(packet_type, (Packet, None))
     if parse_func is None:
-        return pkt_class(PacketType(typ), data[4:])
+        return pkt_class(packet_type, data[4:])
     return parse_func(data[4:])

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import struct
 
 from .const import CAM_MAGIC, PacketType
 from .encrypt import ENC_METHODS
@@ -64,7 +65,13 @@ class Discovery:
         except ValueError:
             return
 
-        pkt = parse_packet(decoded)
+        try:
+            pkt = parse_packet(decoded)
+        except (ValueError, struct.error, IndexError):
+            # A stray/corrupt datagram on the discovery socket must not abort
+            # on_receive; drop it and keep listening.
+            logger.debug('Dropping undecodable discovery datagram from %s', addr)
+            return
         logger.debug(f"Received {pkt} from {addr}")
 
         if pkt.type == PacketType.PunchPkt:
