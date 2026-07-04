@@ -17,11 +17,13 @@ from .const import (
     VideoResolution,
     VideoRotate,
 )
+from .audio import CODECS
 from .encrypt import ENC_METHODS
 from .exceptions import AuthError, CommandResultError
 from .packets import (
     BinaryCmdPkt,
     JsonCmdPkt,
+    make_audio_drw_pkt,
     make_close_pkt,
     make_drw_ack_pkt,
     make_p2palive_ack_pkt,
@@ -31,7 +33,7 @@ from .packets import (
     parse_dev_status,
     parse_packet,
 )
-from .types import Channel, DeviceDescriptor, VideoFrame
+from .types import AudioFrame, Channel, DeviceDescriptor, VideoFrame
 from .utils import DebounceEvent
 
 logger = logging.getLogger(__name__)
@@ -710,15 +712,23 @@ class BinarySession(Session):
         BinaryCommands.CMD_PEER_PLAYBACK_SPEED: BinaryCommands.ACK_PEER_PLAYBACK_SPEED,
         BinaryCommands.CMD_PEER_PLAYBACK_PAUSE: BinaryCommands.ACK_PEER_PLAYBACK_PAUSE,
         BinaryCommands.CMD_PEER_PLAYBACK_RESUME: BinaryCommands.ACK_PEER_PLAYBACK_RESUME,
+        BinaryCommands.CMD_PEER_LIVEAUDIO_START: BinaryCommands.ACK_PEER_LIVEAUDIO_START,
+        BinaryCommands.CMD_PEER_LIVEAUDIO_STOP: BinaryCommands.ACK_PEER_LIVEAUDIO_STOP,
+        BinaryCommands.CMD_PEER_AUDIOPARAM_GET: BinaryCommands.ACK_PEER_AUDIOPARAM_GET,
     }
     REV_ACKS = {v: k for k, v in ACKS.items()}
 
-    def __init__(self, *args, login='', password='', **kwargs):
+    def __init__(self, *args, login='', password='', audio_codec='alaw', **kwargs):
         super().__init__(*args, **kwargs)
         self.auth_login = login or self.DEFAULT_LOGIN
         self.auth_password = password or self.DEFAULT_PASSWORD
         self.ticket = b'\x00' * 4
         self._reassert_task = None
+        # Received-audio pipeline (G.711 -> PCM), talk-back state.
+        self.audio_buffer = SharedFrameBuffer()
+        self.audio_codec = audio_codec if audio_codec in CODECS else 'alaw'
+        self.is_audio_requested = False
+        self._outgoing_audio_idx = 0
 
     async def send_initial_packets(self):
         pkt = make_punch_pkt(self.dev.dev_id)
@@ -1048,6 +1058,59 @@ class BinarySession(Session):
 
     async def playback_step(self):
         await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_STEP)
+
+    # --- Audio (listen + talk-back) ---------------------------------------
+    # The cameras carry 8 kHz G.711 audio. Received audio is decoded to signed
+    # 16-bit PCM and published on audio_buffer; talk-back encodes PCM and sends
+    # it on the audio DRW channel. Wire framing is derived from the decompiled
+    # app and unverified against hardware.
+
+    async def handle_incoming_audio_packet(self, drw_pkt):
+        payload = drw_pkt.get_drw_payload()
+        # Some firmwares prefix each audio chunk with the same 0x20-byte stream
+        # header used for video; strip it when present.
+        if payload.startswith(VIDEO_MARKER):
+            payload = payload[0x20:]
+        if not payload:
+            return
+        decode = CODECS[self.audio_codec][0]
+        try:
+            pcm = decode(payload)
+        except Exception:
+            logger.debug('Failed to decode audio chunk', exc_info=True)
+            return
+        await self.audio_buffer.publish(AudioFrame(idx=drw_pkt._cmd_idx, data=pcm))
+
+    async def get_audio_frame(self):
+        return await self.audio_buffer.get()
+
+    async def start_audio(self):
+        if not self.is_audio_requested:
+            logger.info('%s: start audio', self.dev.dev_id)
+            await self.send_command(BinaryCommands.CMD_PEER_LIVEAUDIO_START)
+            self.is_audio_requested = True
+
+    async def stop_audio(self):
+        if self.is_audio_requested:
+            self.is_audio_requested = False
+            await self.send_command(BinaryCommands.CMD_PEER_LIVEAUDIO_STOP)
+
+    async def start_talk(self):
+        """Open the talk-back (speaker) channel."""
+        logger.info('%s: start talk-back', self.dev.dev_id)
+        await self.send_command(BinaryCommands.CMD_LOCAL_LIVEAUDIO_START)
+
+    async def stop_talk(self):
+        await self.send_command(BinaryCommands.CMD_LOCAL_LIVEAUDIO_STOP)
+
+    async def send_audio(self, pcm):
+        """Send one chunk of signed 16-bit little-endian PCM to the camera
+        speaker (encoded with the session codec) on the audio DRW channel."""
+        encode = CODECS[self.audio_codec][1]
+        payload = encode(pcm)
+        idx = self._outgoing_audio_idx & 0xFFFF
+        self._outgoing_audio_idx = (self._outgoing_audio_idx + 1) & 0xFFFF
+        await self.send(make_audio_drw_pkt(idx, payload))
 
     async def setup_device(self):
         auth = await self.login()

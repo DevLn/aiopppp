@@ -269,6 +269,11 @@ def parse_drw_pkt(data):
     return DrwPkt(channel, cmd_idx, data[4:])
 
 
+def make_audio_drw_pkt(cmd_idx, payload):
+    """Outgoing audio (talk-back) frame on the audio DRW channel."""
+    return DrwPkt(Channel.Audio, cmd_idx, payload)
+
+
 def make_drw_ack_pkt(drw_pkt):
     return Packet(
         PacketType.DrwAck,
