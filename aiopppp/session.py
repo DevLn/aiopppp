@@ -700,6 +700,16 @@ class BinarySession(Session):
         BinaryCommands.CMD_NET_WIFISETTING_SET: BinaryCommands.ACK_NET_WIFISETTING_SET,
         BinaryCommands.CMD_NET_WIFI_SCAN: BinaryCommands.ACK_NET_WIFI_SCAN,
         BinaryCommands.CMD_NET_WIREDSETTING_GET: BinaryCommands.ACK_NET_WIREDSETTING_GET,
+        BinaryCommands.CMD_SD_INFO_GET: BinaryCommands.ACK_SD_INFO_GET,
+        BinaryCommands.CMD_SD_RECORDFILE_GET: BinaryCommands.ACK_SD_RECORDFILE_GET,
+        BinaryCommands.CMD_SD_PICFILE_GET: BinaryCommands.ACK_SD_PICFILE_GET,
+        BinaryCommands.CMD_SD_RECORDING_NOW: BinaryCommands.ACK_SD_RECORDING_NOW,
+        BinaryCommands.CMD_PEER_PLAYBACK_START: BinaryCommands.ACK_PEER_PLAYBACK_START,
+        BinaryCommands.CMD_PEER_PLAYBACK_STOP: BinaryCommands.ACK_PEER_PLAYBACK_STOP,
+        BinaryCommands.CMD_PEER_PLAYBACK_SEEK: BinaryCommands.ACK_PEER_PLAYBACK_SEEK,
+        BinaryCommands.CMD_PEER_PLAYBACK_SPEED: BinaryCommands.ACK_PEER_PLAYBACK_SPEED,
+        BinaryCommands.CMD_PEER_PLAYBACK_PAUSE: BinaryCommands.ACK_PEER_PLAYBACK_PAUSE,
+        BinaryCommands.CMD_PEER_PLAYBACK_RESUME: BinaryCommands.ACK_PEER_PLAYBACK_RESUME,
     }
     REV_ACKS = {v: k for k, v in ACKS.items()}
 
@@ -974,6 +984,70 @@ class BinarySession(Session):
 
     async def get_wired_settings(self, timeout=5):
         return await self._request(BinaryCommands.CMD_NET_WIREDSETTING_GET, timeout=timeout)
+
+    # --- SD card & playback ------------------------------------------------
+    # Reference: intx82/a9-v720. Payloads (date filters, filenames, offsets)
+    # follow the decompiled command table / PlaybackCtrlBean and are all
+    # unverified against hardware; GET calls return raw ACK bytes for the
+    # caller to parse per its device.
+
+    async def get_sd_info(self, timeout=5):
+        """SD card capacity/status block (CMD_SD_INFO_GET)."""
+        return await self._request(BinaryCommands.CMD_SD_INFO_GET, timeout=timeout)
+
+    async def list_recordings(self, day=None, timeout=10):
+        """List recorded video files, optionally filtered to a given date.
+        `day` may be a datetime/date; sent as an 8-byte YYYYMMDD ascii filter."""
+        payload = b''
+        if day is not None:
+            payload = day.strftime('%Y%m%d').encode('ascii')
+        return await self._request(BinaryCommands.CMD_SD_RECORDFILE_GET, payload, timeout=timeout)
+
+    async def list_pictures(self, day=None, timeout=10):
+        payload = b''
+        if day is not None:
+            payload = day.strftime('%Y%m%d').encode('ascii')
+        return await self._request(BinaryCommands.CMD_SD_PICFILE_GET, payload, timeout=timeout)
+
+    async def is_recording(self, timeout=5):
+        return await self._request(BinaryCommands.CMD_SD_RECORDING_NOW, timeout=timeout)
+
+    @staticmethod
+    def _playback_payload(filename='', offset=0):
+        name = filename.encode('utf-8') if isinstance(filename, str) else (filename or b'')
+        return struct.pack('<I', int(offset)) + name
+
+    async def playback_start(self, filename, offset=0):
+        """Start playback of an SD recording. Playback video is delivered on the
+        normal video channel, so frames arrive through get_video_frame()."""
+        logger.info('%s: playback start %r @ %s', self.dev.dev_id, filename, offset)
+        self.last_drw_pkt_at = datetime.datetime.now()
+        await self.send_command(
+            BinaryCommands.CMD_PEER_PLAYBACK_START, self._playback_payload(filename, offset),
+        )
+        self.is_video_requested = True
+        self._notify_video_state()
+
+    async def playback_stop(self):
+        await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_STOP)
+        if self.is_video_requested:
+            self.is_video_requested = False
+            self._notify_video_state()
+
+    async def playback_pause(self):
+        await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_PAUSE)
+
+    async def playback_resume(self):
+        await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_RESUME)
+
+    async def playback_seek(self, offset):
+        await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_SEEK, struct.pack('<I', int(offset)))
+
+    async def playback_speed(self, speed):
+        await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_SPEED, struct.pack('<i', int(speed)))
+
+    async def playback_step(self):
+        await self.send_command(BinaryCommands.CMD_PEER_PLAYBACK_STEP)
 
     async def setup_device(self):
         auth = await self.login()
