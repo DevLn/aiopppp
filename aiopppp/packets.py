@@ -187,20 +187,44 @@ def _cstr(b: bytes) -> str:
     return b.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
 
 
+def _render_ts(ts):
+    return datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def parse_datetime_block(data):
-    """Decode a CMD_SYSTEM_DATETIME_GET response (layout confirmed on PTZA
-    hardware, len=80): u32 unix timestamp (UTC), i32 timezone as seconds WEST
-    of UTC (UTC+2 stored as -7200), 8 pad bytes, char ntp_server[64]."""
+    """Decode a CMD_SYSTEM_DATETIME_GET response (80 bytes, two firmware
+    variants confirmed on hardware):
+
+    - PTZA: u32 unix timestamp (UTC), i32 timezone as seconds WEST of UTC
+      (UTC+2 stored as -7200), 8 pad bytes, char ntp_server[64].
+    - FTYC: u32 timestamp that already renders as LOCAL time (the camera adds
+      its own internally-stored offset when the clock is set), then constant
+      non-tz fields, ntp_server at the same offset. There is no tz in the
+      block, so the field-4 value (e.g. 0xE0) must not be shown as one.
+
+    The variants are told apart by tz plausibility: a real timezone is a
+    multiple of 15 minutes within +/-14 h."""
     if len(data) < 8:
         return {}
-    ts, tz_west = struct.unpack_from('<Ii', data)
-    utc_offset = -tz_west
-    result = {
-        'timestamp': ts,
-        'utc': datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'),
-        'tz': f'UTC{utc_offset // 3600:+d}',
-        'utcOffsetSeconds': utc_offset,
-    }
+    ts, field4 = struct.unpack_from('<Ii', data)
+    tz_plausible = field4 % 900 == 0 and abs(field4) <= 14 * 3600
+    if tz_plausible:
+        utc_offset = -field4
+        result = {
+            'layout': 'utc+tz',
+            'timestamp': ts,
+            'utc': _render_ts(ts),
+            'local': _render_ts(ts + utc_offset),
+            'tz': f'UTC{utc_offset // 3600:+d}',
+            'utcOffsetSeconds': utc_offset,
+        }
+    else:
+        result = {
+            'layout': 'local-only',
+            'timestamp': ts,
+            'local': _render_ts(ts),
+            'tz': 'device-managed',
+        }
     if len(data) >= 80:
         result['ntpServer'] = _cstr(data[16:80])
     return result
