@@ -14,6 +14,7 @@ from .const import (
     PacketType,
     PtzDirection,
     PtzParamType,
+    PtzPrefab,
     VideoParamType,
     VideoResolution,
     VideoRotate,
@@ -1304,25 +1305,45 @@ class BinarySession(Session):
         await asyncio.sleep(0.2)
         await self.rotate_stop()
 
+    # Preset semantics per YsxLite's live view (cmdPtzPreDo/PreRec/PreChk;
+    # the decompile inlines the constants): presets use the PREFAB param
+    # type, NOT the PRE_TO/PRE_REC direction values -- those exist in the SDK
+    # headers but no vendor app ever sends them.
+
     async def ptz_goto_preset(self, index, **kwargs):
-        """Move to a stored PTZ preset position."""
+        """Move to a stored PTZ preset position (1-based index)."""
         self.log.info('goto PTZ preset %s', index)
-        data = self._pack_ptz_dir_cmd(PtzDirection.PTZ_DIRECTION_PRE_TO, index)
+        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, PtzPrefab.PTZ_PREFAB_GET, index)
         await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
 
     async def ptz_set_preset(self, index, **kwargs):
-        """Store the current position as a PTZ preset."""
+        """Store the current position as a PTZ preset (1-based index)."""
         self.log.info('save PTZ preset %s', index)
-        data = self._pack_ptz_dir_cmd(PtzDirection.PTZ_DIRECTION_PRE_REC, index)
+        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, PtzPrefab.PTZ_PREFAB_SET, index)
         await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
 
+    async def ptz_delete_preset(self, index, **kwargs):
+        """Delete a stored PTZ preset (1-based index)."""
+        self.log.info('delete PTZ preset %s', index)
+        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, PtzPrefab.PTZ_PREFAB_DEL, index)
+        await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
+
+    async def ptz_query_presets(self, timeout=5):
+        """Ask which presets are stored. The vendor app receives a
+        (type, param, value) bean back where value is a bitmask with bit
+        (n-1) set for stored preset n. Returns the raw ACK payload."""
+        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, PtzPrefab.PTZ_PREFAB_CHK, 0)
+        return await self._request(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data, timeout=timeout)
+
     @staticmethod
-    def _pack_ptz_dir_cmd(ptz: PtzDirection, index: int = 0) -> bytes:
-        # The passthrough PTZ frame is (param_type, direction, arg). For plain
-        # moves arg is 0; for presets the direction is PRE_TO/PRE_REC and arg is
-        # the preset index.
-        data = struct.pack('>III', PtzParamType.PTZ_PARAM_TYPE_DIRECTION, int(ptz), index)
+    def _pack_ptz_cmd(param_type, param, value) -> bytes:
+        # The passthrough PTZ frame is (param_type, param, value): plain moves
+        # are (DIRECTION, direction, 0), presets are (PREFAB, op, index).
+        data = struct.pack('>III', int(param_type), int(param), int(value))
         return pack_passtrough_cmd(BinaryCommands.CMD_PTZ_SET.value, data)
+
+    def _pack_ptz_dir_cmd(self, ptz: PtzDirection, index: int = 0) -> bytes:
+        return self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_DIRECTION, int(ptz), index)
 
 
 class SharedFrameBuffer:
