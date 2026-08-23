@@ -346,7 +346,15 @@ class Session(PacketQueueMixin, VideoQueueMixin):
                 self.log.info('Video epoch changed %s -> %s', self.video_epoch, pkt_epoch)
                 self.video_epoch = pkt_epoch
                 self.last_drw_pkt_idx = drw_pkt._cmd_idx
-            elif self.last_drw_pkt_idx < drw_pkt._cmd_idx:
+            elif pkt_epoch == self.video_epoch and self.last_drw_pkt_idx < drw_pkt._cmd_idx:
+                # Only chunks from the CURRENT epoch may advance the high-water
+                # mark. A late pre-wrap chunk (e.g. idx 65529 retransmitted
+                # after the counter wrapped to 0) belongs to the previous epoch;
+                # feeding it in here re-armed the wrap detector and the next
+                # post-wrap chunk bumped the epoch again -- ping-ponging the
+                # epoch up several times a second (seen on FTYC hardware,
+                # epochs 0->6 in seconds) and scattering reassembly indices
+                # 0x10000 apart, which killed every frame after the first.
                 self.last_drw_pkt_idx = drw_pkt._cmd_idx
 
             if self.video_stale_at:
