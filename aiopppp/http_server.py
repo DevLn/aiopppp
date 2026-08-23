@@ -8,7 +8,7 @@ import uuid
 from aiohttp import web
 
 from .const import VideoParamType, VideoResolution, VideoRotate
-from .packets import parse_datetime_block, parse_wifi_settings
+from .packets import parse_datetime_block, parse_user_block, parse_wifi_settings
 
 logger = logging.getLogger(__name__)
 
@@ -126,16 +126,18 @@ def _camera_page_html(dev_id):
         }
     }
 
-    async function loadInfo() {
+    async function loadInto(path, label) {
         const el = document.getElementById('info-dump');
-        el.textContent = 'reading...';
+        el.textContent = `${label}: reading...`;
         try {
-            const resp = await fetch(`/${DEV}/info`);
-            el.textContent = JSON.stringify(await resp.json(), null, 2);
+            const resp = await fetch(`/${DEV}/${path}`);
+            el.textContent = `${label}:\n` + JSON.stringify(await resp.json(), null, 2);
         } catch (e) {
-            el.textContent = `failed: ${e}`;
+            el.textContent = `${label} failed: ${e}`;
         }
     }
+
+    function loadInfo() { return loadInto('info', 'device info'); }
 
     function setAlias() {
         const name = document.getElementById('alias-input').value;
@@ -258,6 +260,8 @@ def _camera_page_html(dev_id):
 
         '<h3>System</h3>'
         '<button onClick="loadInfo()">Load device info</button> '
+        '<button onClick="loadInto(\'wifi-scan\', \'wifi scan\')">Scan Wi-Fi (~10s)</button> '
+        '<button onClick="loadInto(\'users\', \'device users\')">Show users</button> '
         'Alias: <input id="alias-input" type="text" style="width:10em">'
         '<button onClick="setAlias()">Set</button> '
         f'<button onClick="sendCommand(\'sync-datetime\')">Sync date/time</button> '
@@ -425,6 +429,58 @@ async def get_info(request):
     return web.json_response({'status': 'ok', 'info': info})
 
 
+async def wifi_scan(request):
+    """Trigger a Wi-Fi scan and return the raw result plus a best-effort list
+    of SSID-looking printable strings (the scan-list struct is unverified)."""
+    session, err = _get_session(request)
+    if err:
+        return err
+    if not hasattr(session, 'scan_wifi'):
+        return _json_error('not supported by this device', 501)
+    try:
+        data = await session.scan_wifi(timeout=12)
+    except Exception as e:
+        return _json_error(f'{type(e).__name__}: {e}', 500)
+    # Pull out printable ASCII runs as candidate SSIDs to make the raw
+    # dump readable; the exact record layout is still unknown.
+    candidates, run = [], bytearray()
+    for b in data:
+        if 32 <= b < 127:
+            run.append(b)
+        else:
+            if len(run) >= 3:
+                candidates.append(run.decode('ascii'))
+            run = bytearray()
+    if len(run) >= 3:
+        candidates.append(run.decode('ascii'))
+    return web.json_response({
+        'status': 'ok',
+        'length': len(data),
+        'strings': candidates[:50],
+        'raw': data.hex(' '),
+    })
+
+
+async def get_users(request):
+    """Configured device users (CMD_SYSTEM_USER_GET), decoded per the vendor
+    app's layout."""
+    session, err = _get_session(request)
+    if err:
+        return err
+    if not hasattr(session, 'get_users'):
+        return _json_error('not supported by this device', 501)
+    try:
+        data = await session.get_users(timeout=5)
+    except Exception as e:
+        return _json_error(f'{type(e).__name__}: {e}', 500)
+    return web.json_response({
+        'status': 'ok',
+        'user': parse_user_block(data) or None,
+        'length': len(data),
+        'raw': data.hex(' '),
+    })
+
+
 async def get_snapshot(request):
     """Still image (ENH-002). CMD_SNAPSHOT_GET goes unanswered on all tested
     hardware (FTYC + PTZA), so fall back to the latest reassembled video
@@ -551,6 +607,8 @@ async def start_web_server(port=4000):
     app.router.add_get('/{dev_id}/snapshot', get_snapshot)
     app.router.add_get('/{dev_id}/params', get_params)
     app.router.add_get('/{dev_id}/info', get_info)
+    app.router.add_get('/{dev_id}/wifi-scan', wifi_scan)
+    app.router.add_get('/{dev_id}/users', get_users)
     app.router.add_get('/{dev_id}/audio', stream_audio)
     app.router.add_post('/{dev_id}/c/{cmd}', handle_commands)
 
