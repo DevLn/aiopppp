@@ -464,22 +464,34 @@ def _wav_header(sample_rate=8000):
     )
 
 
+# Live /audio listeners per device. A plain "did I start it" boolean raced:
+# when a new listener connected while the previous one (an aborted fetch, the
+# fallback <audio> element) was still tearing down, the old teardown stopped
+# the camera stream AFTER the new listener attached -- audio played for a
+# second and then starved. Only the last listener out stops the camera.
+_AUDIO_LISTENERS = {}
+
+
 async def stream_audio(request):
     """Live audio as a streaming WAV (ENH-005). Starts the camera audio stream
-    on first listener and stops it when the listener disconnects."""
+    for the first listener; the camera is stopped only when the last listener
+    disconnects."""
     session, err = _get_session(request)
     if err:
         return err
     if not hasattr(session, 'start_audio'):
         return _json_error('not supported by this device', 501)
+    dev_id = request.match_info['dev_id']
 
     response = web.StreamResponse()
     response.content_type = 'audio/wav'
     await response.prepare(request)
 
-    we_started = not session.is_audio_requested
-    if we_started:
-        await session.start_audio()
+    _AUDIO_LISTENERS[dev_id] = _AUDIO_LISTENERS.get(dev_id, 0) + 1
+    # Always (re)request: if a concurrent teardown just stopped the camera,
+    # is_audio_requested is False again and this re-arms it; otherwise
+    # start_audio is a no-op.
+    await session.start_audio()
     try:
         await response.write(_wav_header())
         while True:
@@ -488,7 +500,9 @@ async def stream_audio(request):
     except (ConnectionResetError, asyncio.CancelledError):
         pass
     finally:
-        if we_started:
+        _AUDIO_LISTENERS[dev_id] = _AUDIO_LISTENERS.get(dev_id, 1) - 1
+        if _AUDIO_LISTENERS[dev_id] <= 0:
+            _AUDIO_LISTENERS.pop(dev_id, None)
             try:
                 await session.stop_audio()
             except Exception:
