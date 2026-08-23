@@ -42,10 +42,12 @@ audio, capturing snapshots, or configuring camera settings, all using asyncio fo
 - &nbsp;🚫&nbsp; **Not supported**: Feature is not supported by the device.
 - &ensp;❔ &nbsp; **Not tested**: Feature has not been tested on the device.
 
-Notes: FTYC has no speaker, hence no talk-back. PTZ presets and device alias are
-not supported by the tested firmwares (the vendor app doesn't implement them
-either). Flip/mirror (`rotate` video param) works on FTYC, is ACKed but ignored
-by PTZA.
+Notes: FTYC has no speaker, hence no talk-back. Device alias is not supported
+by the tested firmwares (the vendor app doesn't implement it either).
+Flip/mirror (`rotate` video param) works on FTYC, is ACKed but ignored by
+PTZA. PTZ presets use the PREFAB scheme found in YsxLite
+(save/goto/delete/query via `ptz_set_preset` / `ptz_goto_preset` /
+`ptz_delete_preset` / `ptz_query_presets`) — pending an on-device retest.
 
 ## Hardware-confirmed protocol notes
 
