@@ -45,8 +45,17 @@ class Discovery:
 
     @staticmethod
     def get_possible_discovery_packets():
-        unencrypted = Packet(PacketType.LanSearch, b'')
-        return [x[1](bytes(unencrypted)) for x in ENC_METHODS.values()]
+        # Broadcast both the plain LanSearch (0x30) and the extended
+        # LanSearchExt (0x32). Some cameras/firmwares only answer the extended
+        # variant (the vendor apps send both), so sending just LanSearch left
+        # those devices undiscoverable. Each type is emitted once per known
+        # transport encryption.
+        packets = []
+        for pkt_type in (PacketType.LanSearch, PacketType.LanSearchExt):
+            raw = bytes(Packet(pkt_type, b''))
+            for _decode, encode in ENC_METHODS.values():
+                packets.append(encode(raw))
+        return packets
 
     @staticmethod
     def maybe_decode(data):
