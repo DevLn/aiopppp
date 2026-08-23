@@ -445,6 +445,8 @@ async def stream_video(request):
 
     while True:
         frame = await frame_buffer.get()
+        if not frame.data:
+            continue
         header = f'--{boundary}\r\n'.encode()
         header += b'Content-Length: %d\r\n' % len(frame.data)
         header += b'Content-Type: image/jpeg\r\n\r\n'
