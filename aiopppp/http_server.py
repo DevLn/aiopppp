@@ -69,6 +69,10 @@ def _camera_page_html(dev_id):
         el.style.color = isError ? '#b00' : '#080';
     }
 
+    // Params successfully SET this session -- some cameras (FTYC) apply a
+    // param but never report it back, so the readout shows both.
+    const lastSet = {};
+
     async function sendCommand(cmd, params) {
         setStatus(`${cmd} ...`, false);
         try {
@@ -79,6 +83,7 @@ def _camera_page_html(dev_id):
             const data = await resp.json();
             if (data.status === 'ok') {
                 setStatus(`${cmd}: ok`, false);
+                if (cmd === 'set-video-param') lastSet[params.name] = params.value;
             } else {
                 setStatus(`${cmd}: ${data.message}`, true);
             }
@@ -103,10 +108,15 @@ def _camera_page_html(dev_id):
                 if (p.error) {
                     span.textContent = `${name}: <${p.error}>`;
                 } else {
-                    span.textContent = `${name}: ${p.symbol !== null ? p.symbol : p.value}`;
+                    const reported = p.symbol !== null ? p.symbol : p.value;
+                    let text = `${name}: ${reported}`;
+                    if (name in lastSet && String(lastSet[name]) !== String(reported)) {
+                        text += ` (set to ${lastSet[name]}, not reported back)`;
+                    }
+                    span.textContent = text;
                     span.title = `raw: ${p.raw}`;   // hex payload on hover
                     const sel = document.getElementById(`param-${name}`);
-                    if (sel && p.symbol !== null) sel.value = p.symbol;
+                    if (sel && p.symbol !== null && !(name in lastSet)) sel.value = p.symbol;
                 }
                 el.append(span);
             }
@@ -135,6 +145,60 @@ def _camera_page_html(dev_id):
     function ptzPreset(cmd) {
         const index = +document.getElementById('preset-index').value;
         sendCommand(cmd, {index: index});
+    }
+
+    // --- low-latency audio: fetch the WAV stream and schedule raw PCM via
+    // Web Audio. The <audio> element buffers many seconds of an endless WAV
+    // before it starts; this path plays with ~100 ms latency instead.
+    let audioCtx = null, audioAbort = null;
+
+    function stopLowLatencyAudio() {
+        if (audioAbort) { audioAbort.abort(); audioAbort = null; }
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    }
+
+    async function startLowLatencyAudio() {
+        stopLowLatencyAudio();
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioAbort = new AbortController();
+        let playhead = 0;
+        let pending = new Uint8Array(0);
+        let skip = 44;  // WAV header
+        try {
+            const resp = await fetch(`/${DEV}/audio`, {signal: audioAbort.signal});
+            const reader = resp.body.getReader();
+            setStatus('audio: playing (low-latency)', false);
+            while (audioCtx) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                let buf = value;
+                if (skip > 0) {
+                    const n = Math.min(skip, buf.length);
+                    buf = buf.subarray(n);
+                    skip -= n;
+                    if (!buf.length) continue;
+                }
+                const merged = new Uint8Array(pending.length + buf.length);
+                merged.set(pending);
+                merged.set(buf, pending.length);
+                const even = merged.length & ~1;
+                pending = merged.slice(even);
+                if (!even) continue;
+                const samples = new Int16Array(merged.buffer, 0, even / 2);
+                const ab = audioCtx.createBuffer(1, samples.length, 8000);
+                const ch = ab.getChannelData(0);
+                for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 32768;
+                const src = audioCtx.createBufferSource();
+                src.buffer = ab;
+                src.connect(audioCtx.destination);
+                const now = audioCtx.currentTime;
+                if (playhead < now + 0.05) playhead = now + 0.05;  // fell behind: jump
+                src.start(playhead);
+                playhead += ab.duration;
+            }
+        } catch (e) {
+            if (e.name !== 'AbortError') setStatus(`audio: ${e}`, true);
+        }
     }
 
     window.addEventListener('load', loadParams);
@@ -183,9 +247,14 @@ def _camera_page_html(dev_id):
         'onChange="sendCommand(\'set-video-param\', {name: \'bitrate\', value: +this.value})">'
 
         '<h3>Audio</h3>'
-        f'<audio controls preload="none" src="/{x}/audio"></audio> '
-        f'<button onClick="sendCommand(\'stop-audio\')">Stop Audio</button>'
+        '<button onClick="startLowLatencyAudio()">Play (low-latency)</button>'
+        '<button onClick="stopLowLatencyAudio()">Stop</button> '
         f'<button onClick="sendCommand(\'talk-test\')">Talk test tone (1s)</button>'
+        f'<br/><small>Buffered fallback (several seconds behind): '
+        f'<audio controls preload="none" src="/{x}/audio"></audio> '
+        f'<button onClick="sendCommand(\'stop-audio\')">Stop Audio</button><br/>'
+        'FTYC-style cameras deliver audio muxed with video &mdash; audio only '
+        'flows while the video stream is running.</small>'
 
         '<h3>System</h3>'
         '<button onClick="loadInfo()">Load device info</button> '
