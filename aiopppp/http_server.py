@@ -8,6 +8,7 @@ import uuid
 from aiohttp import web
 
 from .const import VideoParamType, VideoResolution, VideoRotate
+from .packets import parse_datetime_block, parse_wifi_settings
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +94,23 @@ def _camera_page_html(dev_id):
         try {
             const resp = await fetch(`/${DEV}/params`);
             const data = await resp.json();
-            const parts = [];
+            el.textContent = '';
+            let first = true;
             for (const [name, p] of Object.entries(data.params || {})) {
-                if (p.error) { parts.push(`${name}: <${p.error}>`); continue; }
-                parts.push(`${name}: ${p.symbol !== null ? p.symbol : p.value} (raw ${p.raw})`);
-                const sel = document.getElementById(`param-${name}`);
-                if (sel && p.symbol !== null) sel.value = p.symbol;
+                if (!first) el.append(' | ');
+                first = false;
+                const span = document.createElement('span');
+                if (p.error) {
+                    span.textContent = `${name}: <${p.error}>`;
+                } else {
+                    span.textContent = `${name}: ${p.symbol !== null ? p.symbol : p.value}`;
+                    span.title = `raw: ${p.raw}`;   // hex payload on hover
+                    const sel = document.getElementById(`param-${name}`);
+                    if (sel && p.symbol !== null) sel.value = p.symbol;
+                }
+                el.append(span);
             }
-            el.textContent = parts.join(' | ') || 'no data';
+            if (first) el.textContent = 'no data';
         } catch (e) {
             el.textContent = `failed: ${e}`;
         }
@@ -273,11 +283,18 @@ async def get_params(request):
         except Exception as e:
             result[name] = {'error': f'{type(e).__name__}: {e}'}
             continue
-        expected = VideoParamType[f'VIDEO_PARAM_TYPE_{name.upper()}'].value
+        param_id = VideoParamType[f'VIDEO_PARAM_TYPE_{name.upper()}'].value
         value = None
-        if len(payload) >= 8:
+        if len(payload) >= 48:
+            # PTZA-confirmed: the camera ignores the requested id and answers
+            # with the full table of params 1..12 (u32 each), so the value is
+            # looked up at (param_id - 1).
+            table = struct.unpack_from('<12I', payload)
+            if 1 <= param_id <= 12:
+                value = table[param_id - 1]
+        elif len(payload) >= 8:
             p, v = struct.unpack_from('<II', payload)
-            if p == expected:
+            if p == param_id:
                 value = v
         elif len(payload) >= 4:
             value = struct.unpack_from('<I', payload)[0]
@@ -300,17 +317,30 @@ async def get_info(request):
     if not hasattr(session, 'get_status'):
         return _json_error('not supported by this device', 501)
 
+    def decode_device_info(data):
+        # The 528-byte INF block is mostly zeros on the tested hardware; only
+        # the leading version field is understood so far.
+        out = {'swVersion': '.'.join(str(b) for b in reversed(data[:4]))} if len(data) >= 4 else {}
+        out['raw'] = data.hex(' ')
+        return out
+
+    def decode_datetime(data):
+        return parse_datetime_block(data) or {'raw': data.hex(' ')}
+
+    def decode_wifi(data):
+        return parse_wifi_settings(data) or {'raw': data.hex(' ')}
+
     info = {}
-    for key, call in [
-        ('status', session.get_status),
+    for key, call, decode in [
+        ('status', session.get_status, None),
         # Short timeouts: cameras that don't implement a block shouldn't stall
         # the whole endpoint for the default 5 s each.
         ('device_info', functools.partial(session.get_device_info, timeout=3)
-         if hasattr(session, 'get_device_info') else None),
+         if hasattr(session, 'get_device_info') else None, decode_device_info),
         ('datetime', functools.partial(session.get_datetime, timeout=3)
-         if hasattr(session, 'get_datetime') else None),
+         if hasattr(session, 'get_datetime') else None, decode_datetime),
         ('wifi', functools.partial(session.get_wifi_settings, timeout=3)
-         if hasattr(session, 'get_wifi_settings') else None),
+         if hasattr(session, 'get_wifi_settings') else None, decode_wifi),
     ]:
         if call is None:
             continue
@@ -319,7 +349,9 @@ async def get_info(request):
         except Exception as e:
             info[key] = f'error: {type(e).__name__}: {e}'
             continue
-        info[key] = value.hex(' ') if isinstance(value, bytes) else value
+        if isinstance(value, bytes):
+            value = decode(value) if decode else value.hex(' ')
+        info[key] = value
     return web.json_response({'status': 'ok', 'info': info})
 
 
