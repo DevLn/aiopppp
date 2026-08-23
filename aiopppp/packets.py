@@ -265,6 +265,18 @@ def parse_datetime_block(data):
     return result
 
 
+def parse_user_block(data):
+    """Decode a CMD_SYSTEM_USER_GET response. Layout from the vendor app's
+    IpcByte2ObjectParser.ParseUser (minus its 4-byte JNI prefix):
+    char account[32], char password[128]."""
+    if len(data) < 160:
+        return {}
+    return {
+        'account': _cstr(data[0:32]),
+        'password': _cstr(data[32:160]),
+    }
+
+
 def parse_wifi_settings(data):
     """Decode a CMD_NET_WIFISETTING_GET response (layout confirmed on PTZA
     hardware, len=264): u32 mode, 12 pad bytes, u32 security, 4 pad bytes,

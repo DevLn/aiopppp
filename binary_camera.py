@@ -175,6 +175,17 @@ class BinaryCamera:
                     b'0.0.0.0', b'', b'', b'', b'',
                 )
                 self._send_cmd_ack(BinaryCommands.ACK_NET_WIFISETTING_GET, wifi)
+            elif cmd_id == BinaryCommands.CMD_SYSTEM_USER_GET:
+                # account[32] + password[128], vendor-app layout
+                self._send_cmd_ack(
+                    BinaryCommands.ACK_SYSTEM_USER_GET,
+                    struct.pack('<32s128s', b'admin', b'admin'),
+                )
+            elif cmd_id == BinaryCommands.CMD_NET_WIFI_SCAN:
+                self._send_cmd_ack(
+                    BinaryCommands.ACK_NET_WIFI_SCAN,
+                    struct.pack('<32s', b'TESTNET') + struct.pack('<32s', b'NEIGHBOR-AP'),
+                )
             elif cmd_id == BinaryCommands.CMD_SYSTEM_INF_GET:
                 self._send_cmd_ack(
                     BinaryCommands.ACK_SYSTEM_INF_GET,
