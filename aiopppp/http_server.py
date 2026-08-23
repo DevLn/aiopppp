@@ -356,21 +356,31 @@ async def get_info(request):
 
 
 async def get_snapshot(request):
-    """Still image (ENH-002)."""
+    """Still image (ENH-002). CMD_SNAPSHOT_GET goes unanswered on all tested
+    hardware (FTYC + PTZA), so fall back to the latest reassembled video
+    frame; the x-snapshot-source header says which path served the image."""
     session, err = _get_session(request)
     if err:
         return err
-    if not hasattr(session, 'get_snapshot'):
-        return _json_error('not supported by this device', 501)
-    try:
-        data = await session.get_snapshot()
-    except Exception as e:
-        return _json_error(f'{type(e).__name__}: {e}', 500)
+
+    data, source = b'', 'camera'
+    if hasattr(session, 'get_snapshot'):
+        try:
+            data = await session.get_snapshot(timeout=3)
+        except Exception:
+            data = b''
     if not data:
-        return _json_error('camera returned no snapshot', 504)
+        frame = getattr(session.frame_buffer, 'latest_frame', None)
+        if frame is not None:
+            data, source = frame.data, 'video-frame'
+    if not data:
+        return _json_error(
+            'camera did not answer SNAPSHOT_GET and no video frame is buffered'
+            ' -- start the video stream once and retry', 504)
     return web.Response(body=data, headers={
         'content-type': 'image/jpeg',
         'cache-control': 'no-store',
+        'x-snapshot-source': source,
     })
 
 
