@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import struct
@@ -150,7 +151,9 @@ def parse_dev_status(data):
     ) = struct.unpack('<4s5i64s10B6s4s4s3I', data[:124])
 
     return {
-        'tz': f"UTC{time_zone // 3600:+d}", #time zone is in seconds
+        # time_zone is in seconds WEST of UTC (UTC+2 is stored as -7200,
+        # confirmed on PTZA hardware), so negate it for display.
+        'tz': f"UTC{-time_zone // 3600:+d}",
         'uptime': sys_uptime,
         # Real Wi-Fi signal strength is not identified in this 124-byte struct;
         # don't masquerade the uptime as dBm (it produced bogus signal readings).
@@ -178,6 +181,52 @@ def parse_dev_status(data):
         'icut': ir_cut,
         'lamp': 0, # lamp is not in the status
     }
+
+
+def _cstr(b: bytes) -> str:
+    return b.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
+
+
+def parse_datetime_block(data):
+    """Decode a CMD_SYSTEM_DATETIME_GET response (layout confirmed on PTZA
+    hardware, len=80): u32 unix timestamp (UTC), i32 timezone as seconds WEST
+    of UTC (UTC+2 stored as -7200), 8 pad bytes, char ntp_server[64]."""
+    if len(data) < 8:
+        return {}
+    ts, tz_west = struct.unpack_from('<Ii', data)
+    utc_offset = -tz_west
+    result = {
+        'timestamp': ts,
+        'utc': datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'),
+        'tz': f'UTC{utc_offset // 3600:+d}',
+        'utcOffsetSeconds': utc_offset,
+    }
+    if len(data) >= 80:
+        result['ntpServer'] = _cstr(data[16:80])
+    return result
+
+
+def parse_wifi_settings(data):
+    """Decode a CMD_NET_WIFISETTING_GET response (layout confirmed on PTZA
+    hardware, len=264): u32 mode, 12 pad bytes, u32 security, 4 pad bytes,
+    char ssid[32], char password[128], then five char[16] dotted-quad strings
+    (ip, netmask, gateway, dns1, dns2)."""
+    if len(data) < 184:
+        return {}
+    mode, = struct.unpack_from('<I', data, 0)
+    security, = struct.unpack_from('<I', data, 16)
+    result = {
+        'mode': mode,
+        'security': security,
+        'ssid': _cstr(data[24:56]),
+        'password': _cstr(data[56:184]),
+    }
+    for i, key in enumerate(('ip', 'netmask', 'gateway', 'dns1', 'dns2')):
+        off = 184 + i * 16
+        if len(data) >= off + 16:
+            result[key] = _cstr(data[off:off + 16])
+    return result
+
 
 class BinaryCmdPkt(DrwPkt):
     START_CMD = b'\x11\x0a'

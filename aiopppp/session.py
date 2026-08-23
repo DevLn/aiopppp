@@ -999,11 +999,16 @@ class BinarySession(Session):
     async def get_datetime(self, timeout=5):
         return await self._request(BinaryCommands.CMD_SYSTEM_DATETIME_GET, timeout=timeout)
 
-    async def set_datetime(self, when=None, tz_seconds=0):
-        """Set the device clock. Sends a unix timestamp plus timezone offset in
-        seconds. The exact wire layout is unverified against hardware."""
+    async def set_datetime(self, when=None, tz_seconds=None):
+        """Set the device clock. Sends a unix timestamp (UTC epoch) plus the
+        timezone as seconds WEST of UTC -- the camera stores e.g. UTC+2 as
+        -7200 (layout confirmed against PTZA hardware via DATETIME_GET).
+        With tz_seconds=None the host's current UTC offset is used."""
         if when is None:
             when = datetime.datetime.now()
+        if tz_seconds is None:
+            offset = datetime.datetime.now().astimezone().utcoffset()
+            tz_seconds = -int(offset.total_seconds()) if offset else 0
         ts = int(when.timestamp())
         payload = struct.pack('<ii', ts, int(tz_seconds))
         await self.send_command(BinaryCommands.CMD_SYSTEM_DATETIME_SET, payload)
