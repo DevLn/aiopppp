@@ -287,13 +287,14 @@ async def handle_commands(request):
     params = await request.json()
 
     async def talk_test(**kwargs):
-        # 1 s test tone in 40 ms chunks (320 samples = 640 PCM bytes), paced
-        # in real time so the camera's jitter buffer isn't flooded.
+        # 1 s test tone in 120 ms chunks (960 samples = 1920 PCM bytes) --
+        # the same chunking the camera uses for its own audio -- paced in
+        # real time so the camera's jitter buffer isn't flooded.
         await session.start_talk()
         try:
-            for i in range(0, len(_TONE_PCM), 640):
-                await session.send_audio(_TONE_PCM[i:i + 640])
-                await asyncio.sleep(0.04)
+            for i in range(0, len(_TONE_PCM), 1920):
+                await session.send_audio(_TONE_PCM[i:i + 1920])
+                await asyncio.sleep(0.12)
         finally:
             await session.stop_talk()
 
