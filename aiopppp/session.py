@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 # Prefix of the 0x20-byte header that marks the first chunk of a video frame.
 VIDEO_MARKER = b'\x55\xaa\x15\xa8'
+# Byte 4 of the 0x20 header is the stream type (captured from FTYC hardware;
+# matches cam-reverse). FTYC muxes audio onto the VIDEO DRW channel: each video
+# frame is preceded by one audio packet with the same magic but type 0x06.
+STREAM_TYPE_JPEG = 0x03
+STREAM_TYPE_AUDIO = 0x06
 
 
 class SessionLogAdapter(logging.LoggerAdapter):
@@ -138,6 +143,15 @@ class VideoQueueMixin:
                 self.log.info('stream header sample #%d (payload len=%d): [%s]',
                               self._boundaries_seen, len(video_payload),
                               video_payload[:0x20].hex(' '))
+            stream_type = video_payload[4] if len(video_payload) > 4 else None
+            if stream_type == STREAM_TYPE_AUDIO:
+                # Muxed audio (FTYC): not a frame boundary. Occupy the index
+                # with an empty chunk so the surrounding video frame's window
+                # still completes, and hand the packet to the audio pipeline.
+                self.video_received[video_chunk_idx] = b''
+                await self.handle_incoming_audio_packet(pkt)
+                await self.process_video_frame(video_chunk_idx)
+                return
             self.video_boundaries.add(video_chunk_idx)
             self.video_received[video_chunk_idx] = video_payload[0x20:]
         else:
