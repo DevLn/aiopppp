@@ -155,6 +155,7 @@ def parse_dev_status(data):
         # confirmed on PTZA hardware), so negate it for display.
         'tz': f"UTC{-time_zone // 3600:+d}",
         'uptime': sys_uptime,
+        'uptimeText': _fmt_uptime(sys_uptime),
         # Real Wi-Fi signal strength is not identified in this 124-byte struct;
         # don't masquerade the uptime as dBm (it produced bogus signal readings).
         'dbm': None,
@@ -171,8 +172,13 @@ def parse_dev_status(data):
         'picNmb': pic_nmb,
         'totalSize': total_size,
         'usedSize': used_size,
+        # Only bit 0 of powerSupply is meaningful (external power vs battery)
+        # -- the vendor app displays getPowerSupply() & 1; the high bytes are
+        # unrelated flags. batLevel is the battery voltage in millivolts.
         'powerSupply': power_supply,
+        'externalPower': bool(power_supply & 1),
         'batLevel': bat_level,
+        'batPercent': _bat_percent(bat_level),
         'dhcp': dhcp,
         'ipAddr': _inet_btoa(ip_addr_bytes),
         'netmask': _inet_btoa(netmask_bytes),
@@ -185,6 +191,35 @@ def parse_dev_status(data):
 
 def _cstr(b: bytes) -> str:
     return b.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
+
+
+def _bat_percent(mv):
+    """Battery millivolts -> percent bucket, using the vendor app's own
+    thresholds (FtyCamPro batImgGet). None outside the plausible LiPo range
+    (externally powered cameras report values like 8000)."""
+    if not 3000 <= mv <= 4600:
+        return None
+    for limit, pct in ((4350, 100), (4200, 80), (4100, 60), (3950, 40), (3900, 20)):
+        if mv >= limit:
+            return pct
+    return 10
+
+
+def _fmt_uptime(seconds):
+    """Uptime seconds -> '1d 2h 3m'. None for negative/garbage values (the
+    vendor app never displays this field; some firmwares report junk)."""
+    if seconds < 0:
+        return None
+    minutes, _ = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = []
+    if days:
+        parts.append(f'{days}d')
+    if hours or days:
+        parts.append(f'{hours}h')
+    parts.append(f'{minutes}m')
+    return ' '.join(parts)
 
 
 def _render_ts(ts):
