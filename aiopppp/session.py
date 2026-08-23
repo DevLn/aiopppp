@@ -109,6 +109,11 @@ class VideoQueueMixin:
         # the camera is streaming video we can't frame (e.g. a different marker
         # than VIDEO_MARKER) -- log a sample so the format can be identified.
         self._chunks_since_boundary = 0
+        # Header diagnostics: some firmwares (FTYC) put the 0x20-byte stream
+        # header on far more chunks than one per frame. Sample a few headers so
+        # the type/length fields can be identified from a plain log.
+        self._boundary_headers_logged = 0
+        self._boundaries_seen = 0
 
     async def process_video_queue(self):
         while True:
@@ -127,6 +132,12 @@ class VideoQueueMixin:
         # 0x20 - size of the header starting with this magic
         if video_payload.startswith(VIDEO_MARKER):
             self._chunks_since_boundary = 0
+            self._boundaries_seen += 1
+            if self._boundary_headers_logged < 8 or self._boundaries_seen % 5000 == 0:
+                self._boundary_headers_logged += 1
+                self.log.info('stream header sample #%d (payload len=%d): [%s]',
+                              self._boundaries_seen, len(video_payload),
+                              video_payload[:0x20].hex(' '))
             self.video_boundaries.add(video_chunk_idx)
             self.video_received[video_chunk_idx] = video_payload[0x20:]
         else:
@@ -166,7 +177,20 @@ class VideoQueueMixin:
         if index != self.last_video_frame and not self._frame_missing:
             self.last_video_frame = index
             data = b''.join(self.video_received[i] for i in range(index, last_index))
-            await self.frame_buffer.publish(VideoFrame(idx=index, data=data))
+            # A reassembled MJPEG frame must be SOI..EOI; log rejects so a
+            # polluted stream (e.g. muxed sub-streams) is visible in the log.
+            if self.log.isEnabledFor(logging.DEBUG):
+                valid = data[:2] == b'\xff\xd8'
+                self.log.debug('publish frame idx=%s len=%d head=[%s]%s',
+                               index, len(data), data[:4].hex(' '),
+                               '' if valid else ' NOT-JPEG')
+            if data:
+                # FTYC frames a stream as [bare 0x20-header pkt][header+data
+                # pkt][data...]: the two adjacent header chunks make a
+                # zero-length "frame" between them. Publishing it emitted a
+                # Content-Length: 0 MJPEG part after every real frame, which
+                # froze browsers on the first image.
+                await self.frame_buffer.publish(VideoFrame(idx=index, data=data))
 
         if self.log.isEnabledFor(logging.DEBUG):
             completeness = ''.join(
