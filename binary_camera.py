@@ -151,7 +151,35 @@ class BinaryCamera:
             elif cmd_id == BinaryCommands.CMD_PEER_VIDEOPARAM_SET:
                 self._send_cmd_ack(BinaryCommands.ACK_PEER_VIDEOPARAM_SET)
             elif cmd_id == BinaryCommands.CMD_PEER_VIDEOPARAM_GET:
-                self._send_cmd_ack(BinaryCommands.ACK_PEER_VIDEOPARAM_GET, struct.pack('<II', 1, 2))
+                # Real cameras (PTZA) ignore the requested id and answer with
+                # the full table of params 1..12: resolution=HD, ircut=1.
+                table = [0] * 12
+                table[0] = 2  # resolution -> HD
+                table[8] = 1  # ircut on
+                self._send_cmd_ack(BinaryCommands.ACK_PEER_VIDEOPARAM_GET, struct.pack('<12I', *table))
+            elif cmd_id == BinaryCommands.CMD_SYSTEM_DATETIME_GET:
+                # PTZA layout: u32 UTC epoch, i32 tz seconds west, pad, ntp[64]
+                self._send_cmd_ack(
+                    BinaryCommands.ACK_SYSTEM_DATETIME_GET,
+                    struct.pack('<Ii8x64s', 1787493648, -7200, b'time.windows.com'),
+                )
+            elif cmd_id == BinaryCommands.CMD_SYSTEM_DATETIME_SET:
+                print('... DATETIME_SET ->', data.hex(' '))
+                self._send_cmd_ack(BinaryCommands.ACK_SYSTEM_DATETIME_SET)
+            elif cmd_id == BinaryCommands.CMD_NET_WIFISETTING_GET:
+                # PTZA layout: mode, pad12, security, pad4, ssid[32],
+                # password[128], five char[16] dotted-quad strings
+                wifi = struct.pack(
+                    '<I12xI4x32s128s16s16s16s16s16s',
+                    1, 4, b'TESTNET', b'12345678',
+                    b'0.0.0.0', b'', b'', b'', b'',
+                )
+                self._send_cmd_ack(BinaryCommands.ACK_NET_WIFISETTING_GET, wifi)
+            elif cmd_id == BinaryCommands.CMD_SYSTEM_INF_GET:
+                self._send_cmd_ack(
+                    BinaryCommands.ACK_SYSTEM_INF_GET,
+                    bytes.fromhex('5d0f0202401f0000') + b'\x00' * 520,
+                )
             elif cmd_id == BinaryCommands.CMD_PEER_LIVEVIDEO_START:
                 self._send_cmd_ack(BinaryCommands.ACK_PEER_LIVEVIDEO_START)
                 self._start_video()
