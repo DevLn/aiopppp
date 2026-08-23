@@ -1200,14 +1200,30 @@ class BinarySession(Session):
     async def stop_talk(self):
         await self.send_command(BinaryCommands.CMD_LOCAL_LIVEAUDIO_STOP)
 
+    @staticmethod
+    def _make_audio_stream_header(payload_len, codec_byte=0x02):
+        # Mirror the 0x20 header the camera itself puts on audio (captured
+        # from FTYC): magic, stream type 0x06, codec byte (0x02 observed with
+        # A-law), payload length as u32 LE at offset 16, zeros elsewhere.
+        hdr = bytearray(0x20)
+        hdr[0:4] = VIDEO_MARKER
+        hdr[4] = STREAM_TYPE_AUDIO
+        hdr[5] = codec_byte
+        hdr[16:20] = int(payload_len).to_bytes(4, 'little')
+        return bytes(hdr)
+
     async def send_audio(self, pcm):
         """Send one chunk of signed 16-bit little-endian PCM to the camera
-        speaker (encoded with the session codec) on the audio DRW channel."""
+        speaker (encoded with the session codec) on the audio DRW channel.
+        The chunk is wrapped in the same 0x20 stream header the camera uses
+        for its own audio -- bare G.711 is ignored by the firmware (the
+        vendor app frames its talk audio the same way)."""
         encode = CODECS[self.audio_codec][1]
         payload = encode(pcm)
+        framed = self._make_audio_stream_header(len(payload)) + payload
         idx = self._outgoing_audio_idx & 0xFFFF
         self._outgoing_audio_idx = (self._outgoing_audio_idx + 1) & 0xFFFF
-        await self.send(make_audio_drw_pkt(idx, payload))
+        await self.send(make_audio_drw_pkt(idx, framed))
 
     # --- CGI command vocabulary -------------------------------------------
     # Some A9/XD firmwares answer on the CGI (CB_*) command set instead of the
