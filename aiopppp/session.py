@@ -1031,18 +1031,31 @@ class BinarySession(Session):
     async def get_datetime(self, timeout=5):
         return await self._request(BinaryCommands.CMD_SYSTEM_DATETIME_GET, timeout=timeout)
 
-    async def set_datetime(self, when=None, tz_seconds=None):
-        """Set the device clock. Sends a unix timestamp (UTC epoch) plus the
-        timezone as seconds WEST of UTC -- the camera stores e.g. UTC+2 as
-        -7200 (layout confirmed against PTZA hardware via DATETIME_GET).
-        With tz_seconds=None the host's current UTC offset is used."""
+    async def set_datetime(self, when=None, tz_seconds=None, ntp_server=None):
+        """Set the device clock. Sends the full 80-byte datetime struct
+        mirroring DATETIME_GET (confirmed on PTZA hardware): u32 unix
+        timestamp (UTC epoch), i32 timezone as seconds WEST of UTC (UTC+2 is
+        stored as -7200), 8 pad bytes, char ntp_server[64]. Some firmwares
+        (FTYC) apply the timestamp but not the timezone when sent only the
+        8-byte prefix, hence the full struct. With tz_seconds=None the host's
+        current UTC offset is used; with ntp_server=None the camera's current
+        NTP server is preserved (read back via DATETIME_GET, defaulting to
+        time.windows.com if it doesn't answer)."""
         if when is None:
             when = datetime.datetime.now()
         if tz_seconds is None:
             offset = datetime.datetime.now().astimezone().utcoffset()
             tz_seconds = -int(offset.total_seconds()) if offset else 0
+        if ntp_server is None:
+            ntp_server = 'time.windows.com'
+            try:
+                current = await self.get_datetime(timeout=2)
+                if len(current) >= 80:
+                    ntp_server = current[16:80].split(b'\x00', 1)[0].decode('ascii') or ntp_server
+            except Exception:
+                self.log.debug('DATETIME_GET before set failed; using default NTP server')
         ts = int(when.timestamp())
-        payload = struct.pack('<ii', ts, int(tz_seconds))
+        payload = struct.pack('<Ii8x64s', ts, int(tz_seconds), ntp_server.encode('ascii')[:64])
         await self.send_command(BinaryCommands.CMD_SYSTEM_DATETIME_SET, payload)
 
     async def get_users(self, timeout=5):
