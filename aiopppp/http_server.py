@@ -357,21 +357,7 @@ async def get_params(request):
         except Exception as e:
             result[name] = {'error': f'{type(e).__name__}: {e}'}
             continue
-        param_id = VideoParamType[f'VIDEO_PARAM_TYPE_{name.upper()}'].value
-        value = None
-        if len(payload) >= 48:
-            # PTZA-confirmed: the camera ignores the requested id and answers
-            # with the full table of params 1..12 (u32 each), so the value is
-            # looked up at (param_id - 1).
-            table = struct.unpack_from('<12I', payload)
-            if 1 <= param_id <= 12:
-                value = table[param_id - 1]
-        elif len(payload) >= 8:
-            p, v = struct.unpack_from('<II', payload)
-            if p == param_id:
-                value = v
-        elif len(payload) >= 4:
-            value = struct.unpack_from('<I', payload)[0]
+        value = session.decode_video_param(payload, name)
         symbol = None
         if value is not None and enum_cls is not None:
             try:

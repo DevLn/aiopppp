@@ -150,10 +150,13 @@ def parse_dev_status(data):
         used_size            # 120-123 (int)
     ) = struct.unpack('<4s5i64s10B6s4s4s3I', data[:124])
 
+    # time_zone is in seconds WEST of UTC (UTC+2 is stored as -7200, confirmed
+    # on PTZA hardware). Firmwares without a timezone leave a constant here, so
+    # only render a zone when the value is actually plausible.
+    utc_offset = _tz_west_seconds(time_zone)
     return {
-        # time_zone is in seconds WEST of UTC (UTC+2 is stored as -7200,
-        # confirmed on PTZA hardware), so negate it for display.
-        'tz': f"UTC{-time_zone // 3600:+d}",
+        'tz': f'UTC{utc_offset // 3600:+d}' if utc_offset is not None else None,
+        'utcOffsetSeconds': utc_offset,
         'uptime': sys_uptime,
         'uptimeText': _fmt_uptime(sys_uptime),
         # Real Wi-Fi signal strength is not identified in this 124-byte struct;
@@ -226,6 +229,18 @@ def _render_ts(ts):
     return datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
 
 
+def _tz_west_seconds(value):
+    """Return the UTC offset (seconds EAST) for a raw 'seconds west of UTC'
+    field, or None when the value can't be a timezone.
+
+    Firmwares that don't store a timezone leave a constant in this field
+    (FTYC reports 224), which naively rendered as a bogus zone like UTC-1.
+    A real timezone is a whole number of 15-minute steps within +/-14 h."""
+    if value % 900 or abs(value) > 14 * 3600:
+        return None
+    return -value
+
+
 def parse_datetime_block(data):
     """Decode a CMD_SYSTEM_DATETIME_GET response (80 bytes, two firmware
     variants confirmed on hardware):
@@ -242,9 +257,8 @@ def parse_datetime_block(data):
     if len(data) < 8:
         return {}
     ts, field4 = struct.unpack_from('<Ii', data)
-    tz_plausible = field4 % 900 == 0 and abs(field4) <= 14 * 3600
-    if tz_plausible:
-        utc_offset = -field4
+    utc_offset = _tz_west_seconds(field4)
+    if utc_offset is not None:
         result = {
             'layout': 'utc+tz',
             'timestamp': ts,

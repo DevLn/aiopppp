@@ -967,6 +967,33 @@ class BinarySession(Session):
         await self.wait_ack(idx)
         return await self.wait_cmd_result(BinaryCommands.CMD_PEER_VIDEOPARAM_GET, timeout=timeout)
 
+    @staticmethod
+    def decode_video_param(payload, param):
+        """Pull one parameter's value out of a VIDEOPARAM_GET response.
+
+        Cameras answer in one of three shapes: the full table of params 1..12
+        (u32 each -- PTZA/FTYC ignore the requested id and send everything),
+        a (param, value) pair, or a bare value. Returns None if the payload
+        doesn't carry the requested parameter."""
+        if isinstance(param, VideoParamType):
+            param_id = param.value
+        else:
+            param_id = VideoParamType[f'VIDEO_PARAM_TYPE_{str(param).upper()}'].value
+        if len(payload) >= 48:
+            table = struct.unpack_from('<12I', payload)
+            return table[param_id - 1] if 1 <= param_id <= 12 else None
+        if len(payload) >= 8:
+            got_param, value = struct.unpack_from('<II', payload)
+            return value if got_param == param_id else None
+        if len(payload) >= 4:
+            return struct.unpack_from('<I', payload)[0]
+        return None
+
+    async def get_video_param_value(self, param, timeout=5):
+        """Read one video parameter and return it decoded (None if absent)."""
+        payload = await self.get_video_param(param, timeout=timeout)
+        return self.decode_video_param(payload, param)
+
     # Convenience setters -- thin wrappers over set_video_param so callers don't
     # have to know the symbolic parameter names. Values may be ints or symbolic
     # strings (e.g. resolution 'hd', rotate 'h').
