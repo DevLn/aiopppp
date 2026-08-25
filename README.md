@@ -88,6 +88,20 @@ vendor apps, and are encoded in the library:
 - **`CMD_SNAPSHOT_GET` is not answered** by any tested camera; use the video
   frame buffer for stills (the test web server does this automatically).
 
+## Known issues
+
+- **`start_video()` always requests HD, ignoring any resolution set
+  beforehand.** `_request_video(1)` sends a hardcoded HD parameter and then
+  re-asserts it ~5 s later, because the cameras self-downgrade and ignore the
+  value set at stream start. The re-assert is what makes a resolution chosen
+  *while streaming* stick — but it also means a resolution set while idle is
+  discarded, and the stall-recovery path (`_request_video(1)` again after
+  `VIDEO_REREQUEST_SEC` without frames) can revert a running stream to HD.
+
+  The fix is a per-session preferred resolution that `set_resolution()`
+  records and `_request_video()` prefers over the constant, falling back to
+  today's behaviour when unset. Not implemented yet.
+
 ## Untested / experimental
 
 - **SD card & playback** (`get_sd_info`, `list_recordings`, `playback_*`):
