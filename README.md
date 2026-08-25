@@ -7,7 +7,8 @@ audio, capturing snapshots, or configuring camera settings, all using asyncio fo
 
 ## Features
 
-- Camera discovery (plain and encoded (not all keys))
+- Camera discovery: both `LanSearch` and `LanSearchExt` probes, plain and
+  encoded (not all keys) — some firmwares only answer the extended variant
 - Asynchronous peer-to-peer connections with PPPP-enabled cameras using both JSON and binary control protocols
 - Live MJPEG video streaming, including cameras that mux audio into the video channel (FTYC)
 - **Two-way audio** on binary cameras: G.711 (A-law/µ-law) listening and talk-back to the camera speaker
@@ -25,14 +26,14 @@ audio, capturing snapshots, or configuring camera settings, all using asyncio fo
 
 ## Tested Devices
 
-| Prefix   | Protocol | Video | Audio (listen) | Talk | PTZ | White Light | IR Light | Reboot | Resolution | Flip/Mirror |
-|:---------|:---------|:-----:|:--------------:|:----:|:---:|:-----------:|:--------:|:------:|:----------:|:-----------:|
-| **DGOK** | 📜 JSON  | ✅   | ✖️            | ✖️  | ✅  | ✅          | ✅      | ✅     | ✖️        | ❔          |
-| **PTZA** | 🔢 Binary| ✅   | ✅            | ✅  | ✅  | ✅          | 🚫      | ✅     | ✅        | 🚫          |
-| **FTYC** | 🔢 Binary| ✅   | ✅            | 🚫  | 🚫  | 🚫          | ✅      | ✅     | ✅        | ✅          |
-| [**BATE**<sup>*</sup>](https://github.com/devbis/pppp_camera/issues/4) | 🔢 Binary|❔ |❔ | ❔ | ❔   | ❔           | ❔       | ❔     |  ❔        | ❔          |
-| [**DGB**<sup>*</sup>](https://github.com/devbis/pppp_camera/issues/2) | 📜 JSON   |⚠️ |✖️ | ✖️ | ❔   | ❔           | ❔       | ❔     |  ❔        | ❔          |
-| [**ACCQ**<sup>*</sup>](https://github.com/devbis/pppp_camera/issues/1) | ❔ Unknown|✖️|✖️ | ✖️ | ✖️  | ✖️          | ✖️      | ✖️     | ✖️        | ✖️          |
+| Prefix   | Protocol | Video | Audio (listen) | Talk | PTZ | White Light | IR Light | Reboot | Resolution | Flip/Mirror | Time sync |
+|:---------|:---------|:-----:|:--------------:|:----:|:---:|:-----------:|:--------:|:------:|:----------:|:-----------:|:---------:|
+| **DGOK** | 📜 JSON  | ✅   | ✖️            | ✖️  | ✅  | ✅          | ✅      | ✅     | ✖️        | ❔          | ✖️       |
+| **PTZA** | 🔢 Binary| ✅   | ✅            | ✅  | ✅  | ✅          | 🚫      | ✅     | ✅        | 🚫          | ✅       |
+| **FTYC** | 🔢 Binary| ✅   | ✅            | 🚫  | 🚫  | 🚫          | ✅      | ✅     | ✅        | ✅          | ⚠️       |
+| [**BATE**<sup>*</sup>](https://github.com/devbis/pppp_camera/issues/4) | 🔢 Binary|❔ |❔ | ❔ | ❔   | ❔           | ❔       | ❔     |  ❔        | ❔          | ❔       |
+| [**DGB**<sup>*</sup>](https://github.com/devbis/pppp_camera/issues/2) | 📜 JSON   |⚠️ |✖️ | ✖️ | ❔   | ❔           | ❔       | ❔     |  ❔        | ❔          | ✖️       |
+| [**ACCQ**<sup>*</sup>](https://github.com/devbis/pppp_camera/issues/1) | ❔ Unknown|✖️|✖️ | ✖️ | ✖️  | ✖️          | ✖️      | ✖️     | ✖️        | ✖️          | ✖️       |
 
 **Legend:**
 - &nbsp;✅&nbsp; **Working**: Feature is fully functional.
@@ -42,7 +43,11 @@ audio, capturing snapshots, or configuring camera settings, all using asyncio fo
 - &nbsp;🚫&nbsp; **Not supported**: Feature is not supported by the device.
 - &ensp;❔ &nbsp; **Not tested**: Feature has not been tested on the device.
 
-Notes: FTYC has no speaker, hence no talk-back. Device alias is not supported
+Notes: FTYC has no speaker, hence no talk-back. Time sync sets the clock on
+both binary firmwares (verified within a couple of seconds of the host), but
+FTYC has no timezone field to write, so its offset stays whatever the vendor
+app configured — hence ⚠️ rather than ✅. JSON cameras expose no set-time
+command at all. Device alias is not supported
 by the tested firmwares (the vendor app doesn't implement it either).
 Flip/mirror (`rotate` video param) works on FTYC, is ACKed but ignored by
 PTZA. PTZ presets are implemented with the PREFAB scheme found in YsxLite
@@ -71,9 +76,15 @@ vendor apps, and are encoded in the library:
   `parse_datetime_block` auto-detects the layout; `set_datetime()` works on
   both (send UTC, preserve the NTP server).
 - **Status block semantics** (per the vendor SDK parser): `batLevel` is the
-  battery voltage in mV (`batPercent` uses the app's own thresholds), only
-  bit 0 of `powerSupply` is meaningful (`externalPower`), `sysUptime` is
-  unreliable and never displayed by the vendor app.
+  battery voltage in mV, only bit 0 of `powerSupply` is meaningful
+  (`externalPower`), and `sysUptime` is unreliable — the vendor app never
+  displays it, so `uptimeText` is `None` for junk values.
+- **`batPercent` is derived from a single-cell LiPo discharge curve**, not
+  from the vendor thresholds. Those thresholds only choose one of five
+  battery *icons* (≥4350/4200/4100/3950/3900 mV); read as percentages they
+  pin a fully-charged camera resting at 4195 mV to "60%" indefinitely.
+  `None` is returned when the field isn't a battery reading at all —
+  mains-only cameras park it at 8000.
 - **`CMD_SNAPSHOT_GET` is not answered** by any tested camera; use the video
   frame buffer for stills (the test web server does this automatically).
 
