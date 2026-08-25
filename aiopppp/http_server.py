@@ -8,8 +8,10 @@ import uuid
 from aiohttp import web
 
 from .const import (
+    BinaryCommands,
     ChipType,
     DevType,
+    LibError,
     VideoParamType,
     VideoResolution,
     VideoRotate,
@@ -433,6 +435,18 @@ async def get_info(request):
         if isinstance(value, bytes):
             value = decode(value) if decode else value.hex(' ')
         info[key] = value
+
+    # Login state, plus the reason for anything the camera turned down -- a
+    # refusal answers with an empty payload, so otherwise there is nothing
+    # above to say why a block came back blank.
+    info['auth'] = getattr(session, 'dev_properties', {}).get('auth')
+    refused = {
+        BinaryCommands(cmd).name: f'{code.name} ({code.value})'
+        for cmd, code in getattr(session, 'cmd_results', {}).items()
+        if code is not None and code < LibError.OK
+    }
+    if refused:
+        info['refused'] = refused
     return web.json_response({'status': 'ok', 'info': info})
 
 

@@ -2,7 +2,8 @@ import asyncio
 import struct
 
 import aiopppp.const
-from aiopppp.const import BinaryCommands
+from aiopppp.const import BinaryCommands, LibError
+from aiopppp.session import BinarySession
 from aiopppp.packets import (
     make_punch_pkt,
     make_p2palive_pkt,
@@ -57,14 +58,32 @@ async def create_udp_server(port, on_receive):
 
 
 class BinaryCamera:
-    def __init__(self, port=32108, dev_id=None):
+    # The only commands a real camera refuses without a login, and the code each
+    # answers with. Confirmed on PTZA fw 2.2.15.93: everything else -- video,
+    # audio, PTZ, lights, the status/info/datetime/wifi-settings reads, video
+    # params (get and set) and time sync -- works unauthenticated.
+    PRIVILEGED = {
+        BinaryCommands.CMD_SYSTEM_REBOOT: LibError.USER_NO_PRIVILEGE,
+        BinaryCommands.CMD_NET_WIFI_SCAN: LibError.CMD_EXCUTE_FAILED,
+        BinaryCommands.CMD_SYSTEM_USER_GET: LibError.CMD_EXCUTE_FAILED,
+    }
+
+    def __init__(self, port=32108, dev_id=None, auth_mode='normal'):
         self.transport = None
         self.port = port
         self.dev_id = dev_id or DeviceID('TEST',123456, 'CAMERA')
         self.input = asyncio.Queue()
         self.output = asyncio.Queue()
         self.client_addr = None
-        self.ticket = b'\x0e\xfc\xff\xff'
+        # Synthetic session ticket, handed out in the USER_CHK reply payload.
+        self.ticket = b'\xde\xad\xbe\xef'
+        # How much an unauthenticated session is allowed:
+        #   'normal' - refuse only PRIVILEGED, as real hardware does
+        #   'stuck'  - refuse everything with UNAUTH, video included; a camera
+        #              that has wedged itself, cleared by a power cycle
+        #   'off'    - no auth checks at all
+        self.auth_mode = auth_mode
+        self.logged_in = False
         self.cmd_idx = 1
         self.video_task = None
         self.video_idx = 1
@@ -104,17 +123,25 @@ class BinaryCamera:
         "00 00 00 00".replace(' ', '')
     )
 
-    def _send_cmd_ack(self, ack_command, cmd_payload=b''):
+    def _send_cmd_ack(self, ack_command, cmd_payload=b'', token=None):
+        # The token field of a reply is the result code, so a success carries
+        # LibError.OK there and puts its data in the payload.
         self.output.put_nowait((
             bytes(BinaryCmdPkt(
                 cmd_idx=self.cmd_idx,
                 command=ack_command,
-                token=self.ticket,
+                token=struct.pack('<i', LibError.OK) if token is None else token,
                 cmd_payload=cmd_payload,
             )),
             self.client_addr,
         ))
         self.cmd_idx += 1
+
+    def _send_cmd_refusal(self, ack_command, code=LibError.UNAUTH):
+        """Refuse the way real hardware does: no payload, negative code in the
+        4-byte token field."""
+        print(f'... refusing {ack_command.name}: {code.name} ({code.value})')
+        self._send_cmd_ack(ack_command, b'', token=struct.pack('<i', code.value))
 
     async def process_drw(self, data):
         cmd_header_len = 12
@@ -136,15 +163,28 @@ class BinaryCamera:
                 await asyncio.sleep(0.1)
                 if username == 'admin' and password == 'admin':
                     # cmd_payload[4:8] is the session ticket the client will echo.
+                    self.logged_in = True
                     self._send_cmd_ack(
                         BinaryCommands.ACK_SYSTEM_USER_CHK,
                         b'\x00\x00\x00\x00' + self.ticket,
                     )
                 else:
-                    self._send_cmd_ack(
-                        BinaryCommands.ACK_SYSTEM_USER_CHK,
-                        bytes.fromhex('575660376fe010101'.rjust(16, '0')),
+                    # PTZA answers bad credentials with -1010, not the -1013
+                    # USER_PWD_INCORRECT the vendor enum also defines.
+                    self.logged_in = False
+                    self._send_cmd_refusal(
+                        BinaryCommands.ACK_SYSTEM_USER_CHK, LibError.CMD_EXCUTE_FAILED,
                     )
+            elif (
+                self.auth_mode != 'off' and not self.logged_in
+                and (self.auth_mode == 'stuck' or cmd_id in self.PRIVILEGED)
+            ):
+                code = LibError.UNAUTH if self.auth_mode == 'stuck' else self.PRIVILEGED[cmd_id]
+                ack = BinarySession.ACKS.get(cmd_id)
+                if ack is None:
+                    print('... unauthenticated, unhandled command:', cmd_id)
+                else:
+                    self._send_cmd_refusal(ack, code)
             elif cmd_id == BinaryCommands.CMD_SYSTEM_STATUS_GET:
                 await asyncio.sleep(0.1)
                 self._send_cmd_ack(BinaryCommands.ACK_SYSTEM_STATUS_GET, self._STATUS_BLOB)
@@ -283,7 +323,10 @@ class BinaryCamera:
 async def main():
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 32108
-    camera = BinaryCamera(port=port)
+    # binary_camera.py [port] [normal|stuck|off]
+    auth_mode = sys.argv[2] if len(sys.argv) > 2 else 'normal'
+    print(f'Listening on {port}, auth mode: {auth_mode}')
+    camera = BinaryCamera(port=port, auth_mode=auth_mode)
     await camera.run()
 
 
