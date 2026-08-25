@@ -196,16 +196,36 @@ def _cstr(b: bytes) -> str:
     return b.split(b'\x00', 1)[0].decode('utf-8', errors='replace')
 
 
+# Resting-voltage curve for a single-cell LiPo, as (millivolts, percent).
+# Interpolated between points; the cells in these cameras charge to ~4.2 V.
+#
+# NOT the vendor app's thresholds: those pick one of five battery ICONS
+# (>=4350 / >=4200 / >=4100 / >=3950 / >=3900), and reading the third icon as
+# "60%" made a fully-charged camera sitting on the charger at 4195 mV report
+# 60% forever. Icon buckets are not percentages.
+_BATTERY_CURVE = (
+    (4200, 100), (4150, 95), (4110, 90), (4080, 85), (4020, 80),
+    (3980, 75), (3950, 70), (3910, 65), (3870, 60), (3850, 55),
+    (3840, 50), (3820, 45), (3800, 40), (3790, 35), (3770, 30),
+    (3750, 25), (3730, 20), (3710, 15), (3690, 10), (3610, 5),
+    (3270, 0),
+)
+
+
 def _bat_percent(mv):
-    """Battery millivolts -> percent bucket, using the vendor app's own
-    thresholds (FtyCamPro batImgGet). None outside the plausible LiPo range
-    (externally powered cameras report values like 8000)."""
+    """Battery millivolts -> percent, or None when the field isn't a battery
+    reading (mains-only cameras park it at 8000)."""
     if not 3000 <= mv <= 4600:
         return None
-    for limit, pct in ((4350, 100), (4200, 80), (4100, 60), (3950, 40), (3900, 20)):
-        if mv >= limit:
-            return pct
-    return 10
+    if mv >= _BATTERY_CURVE[0][0]:
+        return 100
+    if mv <= _BATTERY_CURVE[-1][0]:
+        return 0
+    for (hi_mv, hi_pct), (lo_mv, lo_pct) in zip(_BATTERY_CURVE, _BATTERY_CURVE[1:]):
+        if mv >= lo_mv:
+            span = hi_mv - lo_mv
+            return round(lo_pct + (hi_pct - lo_pct) * (mv - lo_mv) / span)
+    return 0
 
 
 def _fmt_uptime(seconds):
