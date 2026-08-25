@@ -16,7 +16,7 @@ audio, capturing snapshots, or configuring camera settings, all using asyncio fo
 - White light / IR light control, image flip/mirror (camera-dependent)
 - Video parameters: resolution, bitrate, etc. — set and read-back
 - Snapshots (via `CMD_SNAPSHOT_GET` where supported, otherwise from the live video frame buffer)
-- System commands: reboot, device status (battery, power source, uptime), date/time sync
+- System commands: reboot, device status (battery, power source, Wi-Fi signal), date/time sync
   (both known firmware layouts), device info, Wi-Fi settings read-out
 - Automatic reconnection with backoff (`Device` high-level API)
 - SD card listing and playback control *(implemented, untested on hardware)*
@@ -76,9 +76,14 @@ vendor apps, and are encoded in the library:
   `parse_datetime_block` auto-detects the layout; `set_datetime()` works on
   both (send UTC, preserve the NTP server).
 - **Status block semantics** (per the vendor SDK parser): `batLevel` is the
-  battery voltage in mV, only bit 0 of `powerSupply` is meaningful
-  (`externalPower`), and `sysUptime` is unreliable — the vendor app never
-  displays it, so `uptimeText` is `None` for junk values.
+  battery voltage in mV, and bit 0 of `powerSupply` is `externalPower`.
+- **The field the SDK calls `sysUptime` is actually the Wi-Fi RSSI**, exposed
+  as `dbm`. The name is the only thing about it that suggests a duration: in
+  both vendor apps every read of it goes straight to `setWifidbm()` and is
+  rendered by `wlanSigGet()`, whose buckets are RSSI ranges
+  (−100/−85/−70/−55). There is no uptime display anywhere in either app.
+  Values outside a plausible −127…−1 are reported as `None`. No `uptime` key
+  is published.
 - **`batPercent` is derived from a single-cell LiPo discharge curve**, not
   from the vendor thresholds. Those thresholds only choose one of five
   battery *icons* (≥4350/4200/4100/3950/3900 mV); read as percentages they
