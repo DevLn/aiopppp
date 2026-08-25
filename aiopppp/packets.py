@@ -129,7 +129,7 @@ def parse_dev_status(data):
         bat_level,           # 4-7 (int)
         time_zone,           # 8-11 (int)
         rec_nmb,             # 12-15 (int)
-        sys_uptime,          # 16-19 (int)
+        wifi_dbm,            # 16-19 (int)
         power_supply,        # 20-23 (int)
         dev_name,            # 24-87 (64 bytes)
         sd_status,           # 88 (1 byte)
@@ -157,11 +157,13 @@ def parse_dev_status(data):
     return {
         'tz': f'UTC{utc_offset // 3600:+d}' if utc_offset is not None else None,
         'utcOffsetSeconds': utc_offset,
-        'uptime': sys_uptime,
-        'uptimeText': _fmt_uptime(sys_uptime),
-        # Real Wi-Fi signal strength is not identified in this 124-byte struct;
-        # don't masquerade the uptime as dBm (it produced bogus signal readings).
-        'dbm': None,
+        # The vendor SDK names this field sysUptime, but that name is the only
+        # thing about it that says "uptime": both apps feed it straight to
+        # setWifidbm() and render it through wlanSigGet(), whose buckets are
+        # RSSI ranges (-100/-85/-70/-55). It is the Wi-Fi signal. Cameras that
+        # don't report one leave a value outside the plausible range.
+        # See VENDOR_APP_FINDINGS.md.
+        'dbm': wifi_dbm if -127 <= wifi_dbm <= -1 else None,
         'devName': dev_name.decode('ascii', errors='ignore').rstrip('\0'),
         'sdStatus': sd_status,
         'p2pStatus': p2p_status,
@@ -226,23 +228,6 @@ def _bat_percent(mv):
             span = hi_mv - lo_mv
             return round(lo_pct + (hi_pct - lo_pct) * (mv - lo_mv) / span)
     return 0
-
-
-def _fmt_uptime(seconds):
-    """Uptime seconds -> '1d 2h 3m'. None for negative/garbage values (the
-    vendor app never displays this field; some firmwares report junk)."""
-    if seconds < 0:
-        return None
-    minutes, _ = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    days, hours = divmod(hours, 24)
-    parts = []
-    if days:
-        parts.append(f'{days}d')
-    if hours or days:
-        parts.append(f'{hours}h')
-    parts.append(f'{minutes}m')
-    return ' '.join(parts)
 
 
 def _render_ts(ts):
