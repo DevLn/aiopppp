@@ -11,6 +11,7 @@ from .const import (
     BinaryCommands,
     CgiCommands,
     JsonCommands,
+    LibError,
     PacketType,
     PtzDirection,
     PtzParamType,
@@ -18,6 +19,7 @@ from .const import (
     VideoParamType,
     VideoResolution,
     VideoRotate,
+    enum_name,
 )
 from .audio import CODECS
 from .encrypt import ENC_METHODS
@@ -796,6 +798,9 @@ class BinarySession(Session):
         self.auth_login = login or self.DEFAULT_LOGIN
         self.auth_password = password or self.DEFAULT_PASSWORD
         self.ticket = b'\x00' * 4
+        # Last result code seen per command; a refusal has no payload, so this
+        # is what tells "refused" apart from "answered with nothing".
+        self.cmd_results = {}
         self._reassert_task = None
         # Received-audio pipeline (G.711 -> PCM), talk-back state.
         self.audio_buffer = SharedFrameBuffer()
@@ -809,11 +814,29 @@ class BinarySession(Session):
         pkt.type = PacketType.P2pRdy
         await self.send(pkt)
 
+    @staticmethod
+    def _result_code(drw_pkt):
+        """Decode a reply's 4-byte token as a LibError. A refused command
+        answers with no payload and a negative code here. Returns None when the
+        token isn't a known code -- on success it carries the login ticket."""
+        code = struct.unpack('<i', drw_pkt.token)[0]
+        try:
+            return LibError(code)
+        except ValueError:
+            return None
+
     async def handle_incoming_command_packet(self, drw_pkt):
         if isinstance(drw_pkt, BinaryCmdPkt):
             if drw_pkt.command == BinaryCommands.ACK_SYSTEM_USER_CHK and len(drw_pkt.cmd_payload) > 0:
                 # this is from cam-reverse code
                 self.ticket = drw_pkt.cmd_payload[4:8]
+            result = self._result_code(drw_pkt)
+            if drw_pkt.command in self.REV_ACKS:
+                self.cmd_results[self.REV_ACKS[drw_pkt.command].value] = result
+            if result is not None and result < LibError.OK:
+                self.log.warning(
+                    '%s refused by camera: %s (%d)', drw_pkt.command.name, result.name, result.value,
+                )
             self.log.debug(
                 'handle_incoming_command_packet: token=%s, ticket=%s, %s data=%s (%s)',
                 drw_pkt.token.hex(),
@@ -1041,9 +1064,14 @@ class BinarySession(Session):
         auth_result = await self.wait_cmd_result(BinaryCommands.CMD_SYSTEM_USER_CHK)
         self.log.debug(f"Connect user responded with {auth_result=}")
         if auth_result == b'':
-            #some functions of the camera (like video and ptz) may be available even without login
-            #raise AuthError(f'Login failed: [{auth_result.hex(" ")}]')
-            self.log.error(f'Login failed: [{auth_result.hex(" ")}]')
+            # Not fatal: only reboot, wifi scan and the user list need a login.
+            # Everything else -- video, audio, PTZ, lights, status, video params,
+            # time sync -- works unauthenticated. See VENDOR_APP_FINDINGS.md #12.
+            reason = self.cmd_results.get(BinaryCommands.CMD_SYSTEM_USER_CHK.value)
+            self.log.error(
+                'Login failed for user %r: %s', self.auth_login,
+                f'{reason.name} ({reason.value})' if reason is not None else 'no reason given',
+            )
             return False
         return True
 

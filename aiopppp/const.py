@@ -656,6 +656,46 @@ class WifiType(IntEnum):
     WPA2 = 4
 
 
+class LibError(IntEnum):
+    """Result code returned in the 4-byte *token* field of a binary command
+    reply (see `parse_drw_pkt`) -- not in the payload. Negative means refused,
+    and such a reply carries no payload at all.
+
+    Transcribed verbatim from YsxLite 1.40's `LibError`, misspellings included
+    (CMD_EXCUTE_FAILED, INSUFICIENT_RESOURCE, LOCAL_PEMISSION, UNKOWN,
+    FILE_MAX_NMB), so the names stay greppable against the decompiled app.
+
+    Observed on PTZA fw 2.2.15.93 without a login:
+        CMD_SYSTEM_USER_CHK -> -1010 CMD_EXCUTE_FAILED (bad credentials)
+        CMD_SYSTEM_REBOOT   -> -1015 USER_NO_PRIVILEGE
+        CMD_NET_WIFI_SCAN   -> -1010 CMD_EXCUTE_FAILED
+    """
+    OK = 0
+    NOT_READY = 1
+    ERROR_IPC_BASE = -1000
+    NOT_INITIALIZED = -1001
+    ALREADY_INITIALIZED = -1002
+    NOT_STARTED = -1003
+    ALREADY_STARTED = -1004
+    INVALID_PARAMETER = -1005
+    INSUFICIENT_RESOURCE = -1006
+    LOCAL_MAX_SESSION = -1007
+    PEER_MAX_SESSION = -1008
+    ILLEGAL_CMD = -1009
+    CMD_EXCUTE_FAILED = -1010
+    CMD_PARSE = -1011
+    USER_ACC_NONEXIST = -1012
+    USER_PWD_INCORRECT = -1013
+    UNAUTH = -1014
+    USER_NO_PRIVILEGE = -1015
+    INVALID_SESSION = -1016
+    FILE_NOEXIST = -1020
+    FILE_OPEN_FAILED = -1021
+    FILE_MAX_NMB = -1022
+    LOCAL_PEMISSION = -1998
+    UNKOWN = -1999
+
+
 def enum_name(enum_cls, value, prefix=''):
     """Name for a raw enum value, or None when it isn't in the enum.
 
