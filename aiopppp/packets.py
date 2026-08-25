@@ -3,7 +3,20 @@ import json
 import logging
 import struct
 
-from .const import CAM_MAGIC, CC_DEST, BinaryCommands, PacketType
+from .const import (
+    CAM_MAGIC,
+    CC_DEST,
+    BinaryCommands,
+    ChipType,
+    DevFunc,
+    DevSysMode,
+    DevType,
+    PacketType,
+    SDCardStatus,
+    WifiMode,
+    WifiType,
+    enum_name,
+)
 from .types import Channel, DeviceID
 
 logger = logging.getLogger(__name__)
@@ -154,6 +167,28 @@ def parse_dev_status(data):
     # on PTZA hardware). Firmwares without a timezone leave a constant here, so
     # only render a zone when the value is actually plausible.
     utc_offset = _tz_west_seconds(time_zone)
+
+    # sw_ver is a packed word, not just a version: byte 1 is the device type
+    # and byte 3 the chip type (AppUtils.getDevTypeFromDevVer / getChpTypeFromDevVer).
+    sw_ver_int = struct.unpack('<I', sw_ver)[0]
+    dev_type = (sw_ver_int >> 8) & 0xFF
+    chip_type = (sw_ver_int >> 24) & 0xFF
+
+    # power_supply is packed too: bit 0 external power, bits 4-7 sysMode,
+    # bits 24-31 a live function/state bitmap.
+    sys_mode = (power_supply >> 4) & 0x0F
+    func_bmp = (power_supply >> 24) & 0xFF
+    funcs = DevFunc(func_bmp)
+
+    # Not every firmware fills this word in. PTZA leaves it entirely zero --
+    # confirmed across captures with IR and the light toggled, where not one
+    # byte of the block moved -- while FTYC reports e.g. 0x14000101. A zero
+    # word would otherwise read as a confident "on battery, everything off".
+    # Distinguish with the battery: a camera reporting a real cell voltage has
+    # populated fields, one parked at the 8000 mains placeholder has not.
+    bat_percent = _bat_percent(bat_level)
+    power_populated = power_supply != 0 or bat_percent is not None
+
     return {
         'tz': f'UTC{utc_offset // 3600:+d}' if utc_offset is not None else None,
         'utcOffsetSeconds': utc_offset,
@@ -166,6 +201,11 @@ def parse_dev_status(data):
         'dbm': wifi_dbm if -127 <= wifi_dbm <= -1 else None,
         'devName': dev_name.decode('ascii', errors='ignore').rstrip('\0'),
         'sdStatus': sd_status,
+        'sdStatusName': enum_name(SDCardStatus, sd_status),
+        # Number of client sessions attached, NOT a status code: the vendor app
+        # renders it as "Connected: <n>" into a view named tvSessionNmb, and
+        # FTYC reports 1 while a single client is connected. Keeping the
+        # upstream key name, misleading as it is, to avoid a breaking rename.
         'p2pStatus': p2p_status,
         'connType': conn_type,
         'osdEnable': osd_enable,
@@ -173,24 +213,53 @@ def parse_dev_status(data):
         'mode': mode,
         'recEnableOnStart': rec_enable_on_start,
         'picEnableOnStart': pic_enable_on_start,
-        'recNmb': rec_nmb,
-        'picNmb': pic_nmb,
+        # All-ones means "not tracked" on the tested firmwares. These two come
+        # out of the struct with different signedness (-1 vs 4294967295), which
+        # made the same non-answer look like two different numbers.
+        'recNmb': None if rec_nmb in (-1, 0xFFFFFFFF) else rec_nmb,
+        'picNmb': None if pic_nmb == 0xFFFFFFFF else pic_nmb,
+        # Raw, unscaled. The vendor app divides both by 1 MiB before display;
+        # whether the wire unit is bytes or KB is still unconfirmed (no SD card
+        # to test with), so no conversion is applied here.
         'totalSize': total_size,
         'usedSize': used_size,
-        # Only bit 0 of powerSupply is meaningful (external power vs battery)
-        # -- the vendor app displays getPowerSupply() & 1; the high bytes are
-        # unrelated flags. batLevel is the battery voltage in millivolts.
+        # powerSupply is packed: bit 0 external power, bits 4-7 sysMode,
+        # bits 24-31 the function bitmap. batLevel is millivolts.
         'powerSupply': power_supply,
-        'externalPower': bool(power_supply & 1),
+        # None (not False/0) when this firmware doesn't populate the word --
+        # saying "on battery" about a camera that never reported its power
+        # state is worse than saying nothing.
+        'externalPower': bool(power_supply & 1) if power_populated else None,
+        'sysMode': sys_mode if power_populated else None,
+        'sysModeName': enum_name(DevSysMode, sys_mode, 'SYSMODE_') if power_populated else None,
+        # Bits 0 (fill light) and 1 (IR) confirmed on FTYC. The rest of the
+        # bitmap is unexplained, so only the raw byte is published for it.
+        'funcBmp': func_bmp if power_populated else None,
+        'funcFillLight': bool(funcs & DevFunc.FILL_LIGHT) if power_populated else None,
+        'funcIrLed': bool(funcs & DevFunc.IR_LED) if power_populated else None,
         'batLevel': bat_level,
-        'batPercent': _bat_percent(bat_level),
+        'batPercent': bat_percent,
         'dhcp': dhcp,
         'ipAddr': _inet_btoa(ip_addr_bytes),
         'netmask': _inet_btoa(netmask_bytes),
         'mac':mac.hex(':'),
         'mcuver': _get_dev_version(sw_ver),
+        # swVer is a packed word: byte 1 = device type, byte 3 = chip type.
+        'devType': dev_type,
+        'devTypeName': enum_name(DevType, dev_type, 'DEV_'),
+        'chipType': chip_type,
+        'chipTypeName': enum_name(ChipType, chip_type, 'CHP_'),
+        # This offset was suspected of being swapped with alarmEnable, because
+        # both vendor apps read the equivalent position as alarmEnable. FTYC
+        # hardware says otherwise: toggling IR moved exactly this byte 0->1 and
+        # left alarmEnable at 0, so our layout is right and the apps' does not
+        # hold for this firmware. Confirmed 2026-08-25.
         'icut': ir_cut,
-        'lamp': 0, # lamp is not in the status
+        # Confirmed on FTYC: the fill-light bit of funcBmp tracks the light
+        # command, so lamp state IS in the status block after all. Stays 0
+        # (not None) where the word is unpopulated -- consumers test for the
+        # key's presence to decide whether to offer a lamp entity at all.
+        'lamp': int(bool(funcs & DevFunc.FILL_LIGHT)),
     }
 
 
@@ -307,7 +376,11 @@ def parse_wifi_settings(data):
     security, = struct.unpack_from('<I', data, 16)
     result = {
         'mode': mode,
+        'modeName': enum_name(WifiMode, mode),
         'security': security,
+        # The one enum here that is the vendor's own wording rather than a
+        # transcription -- SetWifiAty.getTypeName() spells these out in code.
+        'securityName': enum_name(WifiType, security),
         'ssid': _cstr(data[24:56]),
         'password': _cstr(data[56:184]),
     }

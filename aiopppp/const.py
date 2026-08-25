@@ -1,4 +1,4 @@
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, IntFlag
 
 CAM_MAGIC = 0xf1
 
@@ -505,3 +505,168 @@ class VideoRotate(IntEnum):
     VIDEO_ROTATE_H = 1
     VIDEO_ROTATE_V = 2
     VIDEO_ROTATE_HV = 3
+
+
+# --------------------------------------------------------------------------
+# Model/capability enums lifted from the vendor apps' own constant classes.
+# They name a raw value; they do not change how anything is decoded, and an
+# unrecognised value yields None rather than a wrong name. Background and
+# per-value evidence: VENDOR_APP_FINDINGS.md.
+# --------------------------------------------------------------------------
+
+class DevType(IntEnum):
+    """`(swVer >> 8) & 0xff`. The app derives this from the firmware version,
+    falling back to the DID prefix (FTZ/PTZ/PIZ -> BK_PTZ, else BK_A9) before
+    the first status reply arrives.
+
+    Both vendor apps ship their own `Constants.DevType` and they DISAGREE.
+    Names below follow FtyCamPro 1.117, which is the superset -- it adds 42,
+    62 and 95, which YsxLite 1.40 lacks. Where the two differ:
+
+        id  FtyCamPro 1.117     YsxLite 1.40
+        0   DEV_BK_UNKNOWN      DEV_MYSELF
+        6   DEV_BK_A9_EXT       DEV_BK_A9_PWRSWITCH_NOSD
+        8   DEV_BK_A9_XD18      DEV_BK_A9_NOCARD1
+        9   DEV_BK_A9_PLUS      DEV_BK_UMS
+
+    Ids 1-5, 7, 10-12, 14-16, 20, 25, 35, 55 and 65 are identical in both.
+
+    Treat the capability-sounding suffixes with care: only YsxLite claims 6 is
+    "PWRSWITCH_NOSD" and 8 is "NOCARD1". What IS corroborated by behaviour is
+    that FtyCamPro hides the battery icon for devType 6, so "externally
+    powered" fits either name.
+
+    Confirmed on hardware: 2 = BK_A9 on a fixed FTYC camera, 15 = XR_PTZ on a
+    pan/tilt PTZA camera.
+    """
+    DEV_BK_UNKNOWN = 0
+    DEV_BK_A9_NOCARD = 1
+    DEV_BK_A9 = 2
+    DEV_BK_XD15 = 3
+    DEV_BK_USB = 4
+    DEV_BK_PTZ = 5
+    DEV_BK_A9_EXT = 6
+    DEV_BK_DCAR = 7
+    DEV_BK_A9_XD18 = 8
+    DEV_BK_A9_PLUS = 9
+    DEV_BK_A9_PWRSWITCH_SD = 10
+    DEV_BK_A9_CGZ = 11
+    DEV_BK_PIZ_BULIT = 12
+    DEV_XR_A9 = 14
+    DEV_XR_PTZ = 15
+    DEV_TX_A9 = 16
+    DEV_BK_LPWR_LPS = 20
+    DEV_BTPTZ_DCAM_BK = 25
+    DEV_BTPTZ_DCAM_TX = 35
+    DEV_TX_8076H19 = 42
+    DEV_TX_PTZ = 55
+    DEV_TX817_DMINI = 62
+    DEV_BKPTZ_DCAM = 65
+    DEV_TX817_YSX_W15 = 95
+
+
+class ChipType(IntEnum):
+    """`(swVer >> 24) & 0xff`, from FtyCamPro's `Constants.ChpType`.
+
+    Single-sourced: YsxLite 1.40 has no ChpType class and no
+    getChpTypeFromDevVer at all, so there is nothing to cross-check against
+    and this list is certainly incomplete -- it names only the TX family.
+
+    FTYC hardware reports 61 (TX_817_810). PTZA reports 2, which is outside
+    this set and so decodes to None. Note the chip family does NOT track the
+    DevType prefix: FTYC is DEV_BK_A9, a "BK" name, on a TX chip.
+    """
+    CHP_UNKNOWN = 0
+    CHP_TX = 60
+    CHP_TX_817_810 = 61
+    CHP_TX_817_H24 = 62
+    CHP_TX_818_C01 = 63
+
+
+class DevSysMode(IntEnum):
+    """`(powerSupply >> 4) & 0x0f`. App labels: "On configuring" / "Normal" /
+    "Low power" (resources dev_sysmode_cfg/nml/lpr)."""
+    SYSMODE_QRCFG = 0
+    SYSMODE_NORMAL = 1
+    SYSMODE_LOWPWR = 2
+
+
+class DevFunc(IntFlag):
+    """`(powerSupply >> 24) & 0xff` -- live state bitmap.
+
+    Bits 0 and 1 are CONFIRMED on FTYC hardware (2026-08-25): toggling IR
+    moved the byte 0x14 -> 0x16 (bit 1) and the light button 0x16 -> 0x17
+    (bit 0), with nothing else in the 124-byte block changing. That also
+    settles the ambiguity between the two vendor activities in favour of
+    LiveDoubleAty -- LiveSingleAty's "bit 0 = OSD" really was a copy-paste
+    slip. Note the light bit follows the *commanded* state: the test camera
+    has no white LED at all and bit 0 still set.
+
+    Bit 2 is NOT confirmed. LiveSingleAty maps it to OSD, but FTYC reports it
+    permanently set while the status block's own osdEnable reads 0, so one of
+    the two is not OSD. Bit 4 is likewise permanently set and unexplained.
+    """
+    FILL_LIGHT = 0x01     # confirmed
+    IR_LED = 0x02         # confirmed
+    OSD = 0x04            # per LiveSingleAty; contradicted by FTYC's osdEnable
+    BIT3 = 0x08
+    BIT4 = 0x10           # always set on FTYC, meaning unknown
+    BIT5 = 0x20
+    BIT6 = 0x40
+    BIT7 = 0x80
+
+
+class SDCardStatus(IntEnum):
+    UNEXIST = 0
+    UNFORMAT = 1
+    BAD_FORMAT = 2
+    DIRTY = 3
+    OK = 4
+    INITIALIZE_FAILED = 5
+    NOT_INITIALIZED = 6
+    RECORDING = 7
+    RECSTOP = 8
+    RECFAILED = 9
+    RW_FAILED = 10
+    TIME_PROBLEM = 11
+    SPACE_INSUFFICIENT = 12
+    OPR_NORESULT = 13
+    OPR_COLLISION = 14
+    FORMATTING = 15
+    RETRYING = 16
+
+
+class WifiMode(IntEnum):
+    """The app's own picker only ever offers these two, and treats mode 0 as
+    station. PTZA reports 1 while joined to an AP, which is outside this set --
+    so either that firmware encodes the field differently or our offset is
+    wrong for it. Unknown values decode to None rather than being guessed."""
+    INFRA = 0
+    AP = 2
+
+
+class WifiType(IntEnum):
+    """Wi-Fi auth type. These labels are the vendor app's own literals
+    (SetWifiAty.getTypeName), so they are the one enum here that is directly
+    attested rather than transcribed."""
+    NONE = 0
+    WEP_OPEN = 1
+    WEP_SHARED = 2
+    WPA = 3
+    WPA2 = 4
+
+
+def enum_name(enum_cls, value, prefix=''):
+    """Name for a raw enum value, or None when it isn't in the enum.
+
+    Used to annotate device info without ever hiding the raw number -- several
+    of these enums are incomplete, so an unknown value must stay visible rather
+    than being coerced into the nearest name.
+    """
+    if value is None:
+        return None
+    try:
+        name = enum_cls(value).name
+    except ValueError:
+        return None
+    return name[len(prefix):] if prefix and name.startswith(prefix) else name

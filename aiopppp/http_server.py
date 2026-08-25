@@ -7,7 +7,14 @@ import uuid
 
 from aiohttp import web
 
-from .const import VideoParamType, VideoResolution, VideoRotate
+from .const import (
+    ChipType,
+    DevType,
+    VideoParamType,
+    VideoResolution,
+    VideoRotate,
+    enum_name,
+)
 from .packets import parse_datetime_block, parse_user_block, parse_wifi_settings
 
 logger = logging.getLogger(__name__)
@@ -226,6 +233,9 @@ def _camera_page_html(dev_id):
         ' &nbsp; Preset: <input id="preset-index" type="number" value="1" min="0" max="255" style="width:4em">'
         '<button onClick="ptzPreset(\'ptz-preset-goto\')">Goto</button>'
         '<button onClick="ptzPreset(\'ptz-preset-set\')">Save</button>'
+        '<br/><small>Presets are unimplemented on PTZA and FTYC &mdash; every prefab '
+        'op was tried by hand on 2026-08-25 and none of them stores, recalls or '
+        'moves anything. The buttons stay for other firmwares.</small>'
 
         '<h3>Lights</h3>'
         f'<button onClick="sendCommand(\'toggle-lamp\', {{value: 1}})">Light ON</button>'
@@ -380,7 +390,18 @@ async def get_info(request):
     def decode_device_info(data):
         # The 528-byte INF block is mostly zeros on the tested hardware; only
         # the leading version field is understood so far.
-        out = {'swVersion': '.'.join(str(b) for b in reversed(data[:4]))} if len(data) >= 4 else {}
+        out = {}
+        if len(data) >= 4:
+            out['swVersion'] = '.'.join(str(b) for b in reversed(data[:4]))
+            # Same packing as the status block's swVer: byte 1 device type,
+            # byte 3 chip type.
+            sw = struct.unpack('<I', data[:4])[0]
+            dev_type = (sw >> 8) & 0xFF
+            chip_type = (sw >> 24) & 0xFF
+            out['devType'] = dev_type
+            out['devTypeName'] = enum_name(DevType, dev_type, 'DEV_')
+            out['chipType'] = chip_type
+            out['chipTypeName'] = enum_name(ChipType, chip_type, 'CHP_')
         out['raw'] = data.hex(' ')
         return out
 
