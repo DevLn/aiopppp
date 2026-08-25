@@ -1336,18 +1336,43 @@ class BinarySession(Session):
     # the decompile inlines the constants): presets use the PREFAB param
     # type, NOT the PRE_TO/PRE_REC direction values -- those exist in the SDK
     # headers but no vendor app ever sends them.
+    #
+    # Op mapping verified against YsxLite's own call sites (LiveSingleAty):
+    #
+    #   cmdPtzPreDo(i, true)  -> cmdPtzSet(1, 0, i)   SET = store preset i
+    #   cmdPtzPreDo(i, false) -> cmdPtzSet(1, 4, i)   DEL = delete preset i
+    #   (recall path)         -> cmdPtzSet(1, 1, i)   GET = go to preset i
+    #   cmdPtzPreChk()        -> cmdPtzSet(1, 3, 0)   CHK = query bitmask
+    #   cmdPtzPreRec()        -> cmdPtzSet(1, 2, 0)   REC = mode toggle, index 0
+    #
+    # Note REC takes index 0 and is paired with a DIRECTION/STOP on the second
+    # press, so it toggles a recording mode rather than saving a preset -- it
+    # is NOT the "store" op, despite the name. An earlier guess that it was
+    # has been backed out.
+    #
+    # All ops were tried by hand against PTZA and FTYC (2026-08-25): none of
+    # them moves the camera or stores anything, so presets are simply not
+    # implemented on the tested hardware. The API is kept as best-effort for
+    # other firmwares. See VENDOR_APP_FINDINGS.md item 9.
+
+    async def ptz_prefab(self, op, index, **kwargs):
+        """Send a raw PREFAB op. `op` is a PtzPrefab (or its int value).
+
+        Exposed so every op can be tried by hand -- the mapping from op to
+        store/recall is a hypothesis, not a confirmed fact.
+        """
+        op = PtzPrefab(int(op))
+        self.log.info('PTZ prefab %s index %s', op.name, index)
+        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, op, index)
+        await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
 
     async def ptz_goto_preset(self, index, **kwargs):
         """Move to a stored PTZ preset position (1-based index)."""
-        self.log.info('goto PTZ preset %s', index)
-        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, PtzPrefab.PTZ_PREFAB_GET, index)
-        await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
+        await self.ptz_prefab(PtzPrefab.PTZ_PREFAB_GET, index)
 
     async def ptz_set_preset(self, index, **kwargs):
         """Store the current position as a PTZ preset (1-based index)."""
-        self.log.info('save PTZ preset %s', index)
-        data = self._pack_ptz_cmd(PtzParamType.PTZ_PARAM_TYPE_PREFAB, PtzPrefab.PTZ_PREFAB_SET, index)
-        await self.send_command(BinaryCommands.CMD_PASSTHROUGH_STRING_PUT, data)
+        await self.ptz_prefab(PtzPrefab.PTZ_PREFAB_SET, index)
 
     async def ptz_delete_preset(self, index, **kwargs):
         """Delete a stored PTZ preset (1-based index)."""
